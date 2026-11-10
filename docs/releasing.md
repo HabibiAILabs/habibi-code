@@ -5,8 +5,8 @@
 3. Tag that tested commit and push the tag:
 
    ```sh
-   git tag -a v0.1.0 -m 'Habibi v0.1.0'
-   git push origin v0.1.0
+   git tag -a v0.2.0 -m 'Habibi v0.2.0'
+   git push origin v0.2.0
    ```
 
 4. The **Release** workflow rejects mismatched/non-stable version tags, rebuilds and tests all four platforms, and gathers archives plus `SHA256SUMS`. It creates a draft and publishes it only after all assets are uploaded. A rerun can repair an unpublished draft; it refuses to modify an already published release.
@@ -34,7 +34,7 @@ curl -fsSL https://habibiailabs.github.io/habibi-code/install.sh | sh
 
 # Pinned version / custom directory (variables belong on sh's side of the pipe)
 curl -fsSL https://habibiailabs.github.io/habibi-code/install.sh | \
-  HABIBI_VERSION=v0.1.0 HABIBI_INSTALL_DIR="$HOME/bin" sh
+  HABIBI_VERSION=v0.2.0 HABIBI_INSTALL_DIR="$HOME/bin" sh
 ```
 
 For review-first installation, download the script to a file, inspect it, then execute it. The installer resolves the latest tag once and pins both the archive and checksum downloads to that tag. A checksum failure leaves an existing installation untouched. No automatic self-update, privilege escalation, shell-profile edits, or telemetry is performed.

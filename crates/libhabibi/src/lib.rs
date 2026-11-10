@@ -2,6 +2,7 @@
 pub mod auth;
 mod provider;
 mod session;
+mod skills;
 mod sse;
 mod tools;
 

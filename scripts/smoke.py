@@ -7,6 +7,7 @@ import fcntl
 import os
 from pathlib import Path
 import pty
+import re
 import select
 import statistics
 import struct
@@ -44,16 +45,40 @@ def launch(args, env, workspace):
             os.write(master, keys)
             received = bytearray()
             deadline = time.monotonic() + 5
-            while marker not in received:
+            # Reconstruct cells because Ratatui's diffs omit unchanged characters.
+            def screen_text(data):
+                cells = [[" " for _ in range(100)] for _ in range(24)]
+                row = col = 0
+                for token in re.findall(r"\x1b\[[0-?]*[ -/]*[@-~]|[^\x1b]", data.decode("utf-8", errors="replace")):
+                    if token.startswith("\x1b["):
+                        if token[-1] in "Hf":
+                            coords = token[2:-1].split(";")
+                            row = int(coords[0] or 1) - 1
+                            col = int(coords[1] or 1) - 1 if len(coords) > 1 else 0
+                        elif token == "\x1b[2J":
+                            cells = [[" " for _ in range(100)] for _ in range(24)]
+                    elif token == "\n": row += 1
+                    elif token == "\r": col = 0
+                    elif not token.isprintable(): pass
+                    else:
+                        if 0 <= row < 24 and 0 <= col < 100: cells[row][col] = token
+                        col += 1
+                return "\n".join("".join(line) for line in cells).encode()
+            while marker not in screen_text(output + received):
                 assert time.monotonic() < deadline, "Modal interaction timed out: " + repr(received)
                 if select.select([master], [], [], 0.1)[0]:
                     received.extend(os.read(master, 65536))
                 assert process.poll() is None, "TUI exited during modal interaction"
             output.extend(received)
 
+        send_and_wait(b"/inspect\r", b"Budget")
+        send_and_wait(b"\t", b"latest")
+        send_and_wait(b"a", b"All session tool calls")
+        os.write(master, b"q")
+        time.sleep(0.1)
         send_and_wait(b"/model\r", b"Model ID")
         send_and_wait(b"\x15smoke-custom-model\r", b"saved.")
-        send_and_wait(b"/settings\r", b"Max model turns")
+        send_and_wait(b"/settings\r", b"Max turns / prompt")
         # Invalid numeric drafts stay open; Esc discards them.
         send_and_wait(b"\t\x15x\r", b"integer")
         os.write(master, b"\x1b")
@@ -155,7 +180,7 @@ with tempfile.TemporaryDirectory(prefix="habibi-smoke-") as directory:
     check_private_login(env, root)
     check_private_login(env, root, cancel=True)
     assert not (root / "config").exists(), "failed/cancelled login wrote credentials"
-    print("PTY launch, model/settings modals, validation, YOLO confirmation, multiline input/paste, /help, terminal restoration, session persistence and resume: passed")
+    print("PTY launch, inspect/model/settings modals, validation, YOLO confirmation, multiline input/paste, /help, terminal restoration, session persistence and resume: passed")
     print("Remote login paste: hidden input, state rejection, cancellation and terminal restoration passed")
     print(f"Binary: {binary.stat().st_size / 1024 / 1024:.2f} MiB")
     print(f"Warm --help median (20 runs): {statistics.median(timings):.2f} ms")

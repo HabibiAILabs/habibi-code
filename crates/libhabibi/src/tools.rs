@@ -23,6 +23,11 @@ pub(crate) struct Definition {
 pub(crate) fn definitions() -> Vec<Definition> {
     vec![
         Definition {
+            name: "load_skill",
+            description: "Read a discovered Agent Skill's full SKILL.md by name. Resources are relative to its base directory. Requires approval like other tools.",
+            schema: json!({"type":"object","properties":{"name":{"type":"string"}},"required":["name"],"additionalProperties":false}),
+        },
+        Definition {
             name: "read",
             description: "Read a UTF-8 workspace file with line numbers. Maximum file size 2 MiB.",
             schema: json!({"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer","minimum":1},"limit":{"type":"integer","minimum":1,"maximum":5000}},"required":["path"],"additionalProperties":false}),

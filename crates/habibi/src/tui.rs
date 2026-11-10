@@ -73,6 +73,7 @@ struct SettingsDialog {
     error: String,
     preferences: Preferences,
     confirm_yolo: bool,
+    sticky_skills: bool,
 }
 impl SettingsDialog {
     fn new(session: &Session, model_only: bool) -> Self {
@@ -82,6 +83,8 @@ impl SettingsDialog {
                 c.model.clone(),
                 c.max_turns.to_string(),
                 c.max_context_bytes.to_string(),
+                c.auto_compact_percent.to_string(),
+                serde_json::to_string(&c.skill_dirs).expect("skill paths"),
             ],
             selected: 0,
             model_only,
@@ -90,26 +93,39 @@ impl SettingsDialog {
             error: String::new(),
             preferences: c.preferences.clone(),
             confirm_yolo: false,
+            sticky_skills: c.sticky_skills,
         }
     }
     fn count(&self) -> usize {
-        if self.model_only { 1 } else { 9 }
+        if self.model_only { 1 } else { 12 }
     }
-    fn values(&self) -> Result<(String, usize, usize)> {
+    fn values(&self) -> Result<(String, usize, usize, u8)> {
         Ok((
             self.fields[0].clone(),
             self.fields[1]
                 .parse()
-                .context("Max turns must be a positive integer")?,
+                .context("Max turns must be a non-negative integer (0 = unlimited)")?,
             self.fields[2]
                 .parse()
                 .context("Context bytes must be a positive integer")?,
+            self.fields[3]
+                .parse()
+                .context("Auto-compaction must be 0–100 (0 disables it)")?,
         ))
     }
     fn key(&mut self, key: KeyEvent) {
         self.error.clear();
         self.confirm_yolo = false;
-        if self.selected >= 3
+        if self.selected == 10
+            && matches!(
+                key.code,
+                KeyCode::Char(' ') | KeyCode::Left | KeyCode::Right
+            )
+        {
+            self.sticky_skills = !self.sticky_skills;
+            return;
+        }
+        if (3..9).contains(&self.selected)
             && matches!(
                 key.code,
                 KeyCode::Char(' ') | KeyCode::Left | KeyCode::Right
@@ -131,13 +147,30 @@ impl SettingsDialog {
             KeyCode::BackTab | KeyCode::Up => {
                 self.selected = (self.selected + self.count() - 1) % self.count()
             }
-            KeyCode::Backspace if self.selected < 3 => {
-                self.fields[self.selected].pop();
+            KeyCode::Backspace
+                if (self.selected < 3 || self.selected == 9 || self.selected == 11) =>
+            {
+                self.fields[if self.selected == 9 {
+                    3
+                } else if self.selected == 11 {
+                    4
+                } else {
+                    self.selected
+                }]
+                .pop();
             }
             KeyCode::Char('u')
-                if key.modifiers.contains(KeyModifiers::CONTROL) && self.selected < 3 =>
+                if key.modifiers.contains(KeyModifiers::CONTROL)
+                    && (self.selected < 3 || self.selected == 9 || self.selected == 11) =>
             {
-                self.fields[self.selected].clear()
+                self.fields[if self.selected == 9 {
+                    3
+                } else if self.selected == 11 {
+                    4
+                } else {
+                    self.selected
+                }]
+                .clear()
             }
             KeyCode::Char('d')
                 if key.modifiers.contains(KeyModifiers::CONTROL) && self.selected == 0 =>
@@ -149,10 +182,25 @@ impl SettingsDialog {
                     && !key
                         .modifiers
                         .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
-                    && self.selected < 3
-                    && self.fields[self.selected].len() < 256 =>
+                    && (self.selected < 3 || self.selected == 9 || self.selected == 11)
+                    && self.fields[if self.selected == 9 {
+                        3
+                    } else if self.selected == 11 {
+                        4
+                    } else {
+                        self.selected
+                    }]
+                    .len()
+                        < 256 =>
             {
-                self.fields[self.selected].push(c);
+                self.fields[if self.selected == 9 {
+                    3
+                } else if self.selected == 11 {
+                    4
+                } else {
+                    self.selected
+                }]
+                .push(c);
             }
             _ => {}
         }
@@ -160,7 +208,7 @@ impl SettingsDialog {
     fn draw(&self, frame: &mut ratatui::Frame) {
         let screen = frame.area();
         let width = screen.width.min(76);
-        let height = screen.height.min(22);
+        let height = screen.height.min(25);
         let area = Rect::new(
             screen.x + (screen.width - width) / 2,
             screen.y + (screen.height - height) / 2,
@@ -180,7 +228,7 @@ impl SettingsDialog {
         }
         let labels = [
             "Model ID",
-            "Max model turns / prompt",
+            "Max turns / prompt (0=unlimited)",
             "Context budget (bytes, not tokens)",
         ];
         let mut lines = vec![
@@ -253,6 +301,50 @@ impl SettingsDialog {
                 ));
             }
         }
+        if !self.model_only {
+            lines.push(Line::styled(
+                format!(
+                    "{} Auto-compact % (0=off): {}",
+                    if self.selected == 9 { "▸" } else { " " },
+                    visible(&self.fields[3])
+                ),
+                Style::default().fg(if self.selected == 9 {
+                    Color::Cyan
+                } else {
+                    Color::White
+                }),
+            ));
+        }
+        if !self.model_only {
+            for (index, label, value) in [
+                (
+                    10,
+                    "Sticky skills",
+                    if self.sticky_skills {
+                        "on".to_string()
+                    } else {
+                        "off".to_string()
+                    },
+                ),
+                (
+                    11,
+                    "Skill directories (JSON list)",
+                    visible(&self.fields[4]),
+                ),
+            ] {
+                lines.push(Line::styled(
+                    format!(
+                        "{} {label}: {value}",
+                        if self.selected == index { "▸" } else { " " }
+                    ),
+                    Style::default().fg(if self.selected == index {
+                        Color::Cyan
+                    } else {
+                        Color::White
+                    }),
+                ));
+            }
+        }
         lines.extend([
             Line::raw(""),
             Line::raw("Type to edit · Ctrl-U clear · Ctrl-D default model"),
@@ -291,6 +383,34 @@ impl SettingsDialog {
     }
 }
 
+#[derive(Default)]
+enum Activity {
+    #[default]
+    Thinking,
+    Responding,
+    Tool(String),
+    Compacting,
+}
+impl Activity {
+    fn label(&self) -> String {
+        match self {
+            Self::Thinking => "Thinking".into(),
+            Self::Responding => "Responding".into(),
+            Self::Tool(name) => format!("Executing tool call: {}", one_line(name, 40)),
+            Self::Compacting => "Compacting context".into(),
+        }
+    }
+}
+
+/// A fixed-width track with a ball that bounces at both ends.
+fn activity_ball(frame: u8) -> String {
+    let phase = frame as usize % 10;
+    let position = if phase <= 5 { phase } else { 10 - phase };
+    (0..6)
+        .map(|index| if index == position { '●' } else { '·' })
+        .collect()
+}
+
 struct View {
     lines: VecDeque<String>,
     bytes: usize,
@@ -300,6 +420,7 @@ struct View {
     status: String,
     title: String,
     dialog: Option<SettingsDialog>,
+    inspector: Option<crate::inspect::Inspector>,
     preferences: Preferences,
     model: String,
     context_used: usize,
@@ -307,6 +428,8 @@ struct View {
     ram: Option<usize>,
     yolo_active: bool,
     busy: bool,
+    activity: Activity,
+    animation_frame: u8,
     input_cursor: usize,
     details: Option<String>,
     details_scroll: u16,
@@ -417,6 +540,8 @@ impl View {
             Event::RunStarted => {
                 self.status = "Thinking · Esc/Ctrl-C cancel".into();
                 self.busy = true;
+                self.activity = Activity::Thinking;
+                self.animation_frame = 0;
                 self.message("Habibi");
             }
             Event::SteeringApplied(text) => {
@@ -427,7 +552,19 @@ impl View {
                 self.context_used = used;
                 self.context_limit = limit;
             }
-            Event::TextDelta(text) => self.append(&text),
+            Event::CompactionStarted => {
+                self.activity = Activity::Compacting;
+                self.status = "Compacting context…".into();
+                self.message("Compacting context…");
+            }
+            Event::Compacted { before, after } => {
+                self.activity = Activity::Thinking;
+                self.message(&format!("Context compacted: {before} → {after} bytes. Original history retained in the journal."));
+            }
+            Event::TextDelta(text) => {
+                self.activity = Activity::Responding;
+                self.append(&text);
+            }
             Event::Permission { call, reply } => {
                 if self.yolo_active {
                     self.message(&format!("  › {} · auto-approved", tool_summary(&call)));
@@ -444,6 +581,7 @@ impl View {
                 self.pending = Some((call, reply));
             }
             Event::ToolStarted(call) => {
+                self.activity = Activity::Tool(call.name.clone());
                 self.status = format!("Running {} · Esc/Ctrl-C cancel", call.name);
                 self.message(&format!("  › {}", tool_summary(&call)));
             }
@@ -451,6 +589,7 @@ impl View {
                 output, is_error, ..
             } => {
                 self.message(&result_summary(&output, is_error));
+                self.activity = Activity::Thinking;
                 self.status = "Thinking · Esc/Ctrl-C cancel".into();
             }
             Event::RunFinished { .. } => {
@@ -458,16 +597,32 @@ impl View {
             }
         }
     }
+    fn prompt_title(&self) -> String {
+        if self.pending.is_some() {
+            "Approval required · Ctrl-Y/Ctrl-N · F2 inspect".into()
+        } else if self.status == "Cancelling…" {
+            "Cancelling…".into()
+        } else if self.busy {
+            format!(
+                " {} {} ",
+                activity_ball(self.animation_frame),
+                self.activity.label()
+            )
+        } else {
+            "Prompt · Enter submit · Alt-Enter follow-up".into()
+        }
+    }
+
     fn status_bar(&self) -> String {
         let mut parts = Vec::new();
         // Safety indicators cannot be hidden by customization.
         if self.yolo_active {
             parts.push("YOLO: ALL tools auto-approved".into());
-        } else if self.preferences.yolo {
-            parts.push("YOLO saved, inactive: /settings to confirm".into());
         }
-        if self.pending.is_some() || self.busy || self.status == "Cancelling…" {
+        if self.pending.is_some() || self.status == "Cancelling…" {
             parts.push(self.status.clone());
+        } else if self.busy {
+            parts.push("Esc/Ctrl-C cancel".into());
         } else if self.preferences.status_activity {
             parts.push("Ready".into());
         }
@@ -540,9 +695,9 @@ impl View {
             frame.render_widget(
                 Paragraph::new(input_lines.iter().map(|line| Line::raw(line.clone())).collect::<Vec<_>>())
                     .scroll((input_scroll.min(u16::MAX as usize) as u16, 0))
-                    .block(Block::default().borders(Borders::ALL).title(if self.pending.is_some() {
-                        "Prompt · approval: Ctrl-Y/Ctrl-N · F2 inspect"
-                    } else { "Prompt · Enter steer · Alt-Enter follow-up" })),
+                    .block(Block::default().borders(Borders::ALL)
+                        .border_style(Style::default().fg(if self.pending.is_some() { Color::Yellow } else if self.busy { Color::Cyan } else { Color::Reset }))
+                        .title(self.prompt_title())),
                 sections[1],
             );
             frame.render_widget(
@@ -555,7 +710,7 @@ impl View {
                     })),
                 sections[2],
             );
-            if self.dialog.is_none() && self.details.is_none() && sections[1].width > 2 && sections[1].height > 2 {
+            if self.dialog.is_none() && self.inspector.is_none() && self.details.is_none() && sections[1].width > 2 && sections[1].height > 2 {
                 frame.set_cursor_position((
                     sections[1].x + 1 + cursor_col as u16,
                     sections[1].y + 1 + cursor_row.saturating_sub(input_scroll) as u16,
@@ -572,6 +727,9 @@ impl View {
             }
             if let Some(dialog) = &self.dialog {
                 dialog.draw(frame);
+            }
+            if let Some(inspector) = &mut self.inspector {
+                inspector.draw(frame);
             }
         })?;
         Ok(())
@@ -595,13 +753,16 @@ pub async fn run(session: Session, path: PathBuf) -> Result<()> {
         pending: None,
         status: "Enter submit · PgUp/PgDn scroll · Ctrl-C quit · /help".into(),
         dialog: None,
+        inspector: None,
         preferences: session.config().preferences.clone(),
         model: format!("{} / {}", session.config().provider, session.config().model),
         context_used: session.context_bytes(),
         context_limit: session.config().max_context_bytes,
         ram: process_ram(),
-        yolo_active: false,
+        yolo_active: session.config().preferences.yolo,
         busy: false,
+        activity: Activity::default(),
+        animation_frame: 0,
         input_cursor: 0,
         details: None,
         details_scroll: 0,
@@ -635,7 +796,7 @@ pub async fn run(session: Session, path: PathBuf) -> Result<()> {
         }
     }
     if session.config().preferences.yolo {
-        view.message("Saved YOLO preference is inactive. Open /settings and apply to confirm auto-approval again.");
+        view.message("Saved YOLO mode restored: ALL tools auto-approved. Shell commands are not sandboxed. Disable in /settings.");
     }
     let mut session = Some(session);
     let mut job: Option<Job> = None;
@@ -648,6 +809,7 @@ pub async fn run(session: Session, path: PathBuf) -> Result<()> {
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut dirty = true;
     let mut last_ram = Instant::now();
+    let mut last_animation = Instant::now();
     let cache = crate::base_dir("XDG_CACHE_HOME", ".cache")
         .ok()
         .map(|base| base.join("habibi/update.json"));
@@ -657,6 +819,11 @@ pub async fn run(session: Session, path: PathBuf) -> Result<()> {
             // Render at most once per frame, not once per token or tool-output chunk.
             tokio::select! {
                 _=tick.tick()=>{
+                    if view.busy && view.pending.is_none() && view.status != "Cancelling…" && last_animation.elapsed() >= Duration::from_millis(100) {
+                        view.animation_frame = (view.animation_frame + 1) % 10;
+                        last_animation = Instant::now();
+                        dirty = true;
+                    }
                     if last_ram.elapsed() >= Duration::from_secs(1) {
                         if view.preferences.status_ram { view.ram = process_ram(); dirty = true; }
                         last_ram = Instant::now();
@@ -689,6 +856,8 @@ pub async fn run(session: Session, path: PathBuf) -> Result<()> {
                         TerminalEvent::Resize(..)=>dirty=true,
                         TerminalEvent::Mouse(mouse) => {
                             match mouse.kind {
+                                MouseEventKind::ScrollUp if view.inspector.is_some() => view.inspector.as_mut().unwrap().scroll(false),
+                                MouseEventKind::ScrollDown if view.inspector.is_some() => view.inspector.as_mut().unwrap().scroll(true),
                                 MouseEventKind::ScrollUp if view.details.is_some() => view.details_scroll=view.details_scroll.saturating_sub(3),
                                 MouseEventKind::ScrollDown if view.details.is_some() => view.details_scroll=view.details_scroll.saturating_add(3),
                                 MouseEventKind::ScrollUp => view.scroll=view.scroll.saturating_add(3),
@@ -698,10 +867,11 @@ pub async fn run(session: Session, path: PathBuf) -> Result<()> {
                             dirty=true;
                         }
                         TerminalEvent::Paste(text)=>{
+                            if view.inspector.is_some() { continue; }
                             if let Some(dialog) = &mut view.dialog {
-                                if dialog.selected >= 3 { continue; }
+                                if (3..9).contains(&dialog.selected) || dialog.selected == 10 { continue; }
                                 dialog.confirm_yolo = false;
-                                let field = &mut dialog.fields[dialog.selected];
+                                let field = &mut dialog.fields[if dialog.selected == 9 { 3 } else if dialog.selected == 11 { 4 } else { dialog.selected }];
                                 let text = visible(&text).replace('\n', " ");
                                 if field.len() + text.len() <= 256 { field.push_str(&text); }
                             } else { view.insert(&visible(&text.replace("\r\n", "\n").replace('\r', "\n"))); }
@@ -709,6 +879,10 @@ pub async fn run(session: Session, path: PathBuf) -> Result<()> {
                         }
                         TerminalEvent::Key(key) if key.kind!=KeyEventKind::Release=>{
                             dirty=true;
+                            if let Some(inspector) = &mut view.inspector {
+                                if inspector.key(key) { view.inspector = None; }
+                                continue;
+                            }
                             if key.code==KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
                                 if let Some(cancel)=&cancellation {cancel.cancel();interrupted=true;view.followups.clear();view.pending=None;view.details=None;view.status="Cancelling…".into();}else{break}
                                 continue
@@ -723,8 +897,9 @@ pub async fn run(session: Session, path: PathBuf) -> Result<()> {
                                             continue;
                                         }
                                         let preferences = dialog.preferences.clone();
-                                        let result = dialog.values().and_then(|(model, turns, bytes)| {
-                                            session.as_mut().context("Settings unavailable during a run")?.update_settings_with_preferences(model, turns, bytes, preferences)
+                                        let result = dialog.values().and_then(|(model, turns, bytes, percent)| {
+                                            let dirs: Vec<std::path::PathBuf> = serde_json::from_str(&dialog.fields[4]).context("Skill directories must be a JSON array of paths")?;
+                                            session.as_mut().context("Settings unavailable during a run")?.update_settings_with_skills(model, turns, bytes, preferences, percent, dialog.sticky_skills, dirs)
                                         });
                                         match result {
                                             Ok(()) => {
@@ -733,6 +908,7 @@ pub async fn run(session: Session, path: PathBuf) -> Result<()> {
                                                 view.preferences = config.preferences.clone();
                                                 view.yolo_active = config.preferences.yolo;
                                                 view.context_limit = config.max_context_bytes;
+                                                view.context_used = session.as_ref().unwrap().context_bytes();
                                                 view.model = format!("{} / {}", config.provider, config.model);
                                                 view.dialog = None;
                                                 view.message("Session settings saved.");
@@ -791,11 +967,19 @@ pub async fn run(session: Session, path: PathBuf) -> Result<()> {
                                         ""=>{},
                                         "/quit"|"/exit"=>break,
                                         "/update" => view.message("Install/upgrade (review the script before running):\ncurl -fsSL https://habibiailabs.github.io/habibi-code/install.sh | sh\nReleases: https://github.com/habibiailabs/habibi-code/releases"),
+                                        "/compact" => {
+                                            let running = session.take().context("Session unavailable")?;
+                                            let (next_job, cancel, sender) = start_job(running, "/compact".into(), tx.clone());
+                                            job = Some(next_job); cancellation = Some(cancel); steering_sender = Some(sender); interrupted = false;
+                                        }
+                                        "/inspect" => {
+                                            view.inspector = Some(crate::inspect::Inspector::new(session.as_ref().context("Session unavailable")?));
+                                        }
                                         "/model" | "/settings" => {
                                             view.dialog = Some(SettingsDialog::new(session.as_ref().context("Session unavailable")?, prompt.trim() == "/model"));
                                         }
-                                        "/help"=>view.message("/model: edit model ID · /settings: model, limits, status bar, tool permissions · /update: upgrade instructions · /quit: exit\nEnter: submit/steer · Alt-Enter: follow-up · Ctrl-Enter/Ctrl-J: newline\nPgUp/PgDn or mouse wheel: scroll · Ctrl-U: clear input · F2: inspect approval\nDuring execution, Esc/Ctrl-C cancels; completed edits are not undone.\nAsk mode: Ctrl-Y allows once, Ctrl-N denies (or y/n in F2 inspector). YOLO auto-approves all tools. Neither mode is a sandbox.\nLogin: leave the TUI and run habibi login codex|claude.\nResume: habibi --resume <session path shown above>."),
-                                        command if command.starts_with('/') => view.message("Unknown command. Available: /model, /settings, /update, /help, /quit, /exit."),
+                                        "/help"=>view.message("/inspect: context and tool-call inspector · /compact: summarize context · /model: edit model ID · /settings: model, limits, status bar, tool permissions · /update: upgrade instructions · /quit: exit\nEnter: submit/steer · Alt-Enter: follow-up · Ctrl-Enter/Ctrl-J: newline\nPgUp/PgDn or mouse wheel: scroll · Ctrl-U: clear input · F2: inspect approval\nDuring execution, Esc/Ctrl-C cancels; completed edits are not undone.\nAsk mode: Ctrl-Y allows once, Ctrl-N denies (or y/n in F2 inspector). YOLO auto-approves all tools. Neither mode is a sandbox.\nLogin: leave the TUI and run habibi login codex|claude.\nResume: habibi --resume <session path shown above>."),
+                                        command if command.starts_with('/') => view.message("Unknown command. Available: /inspect, /compact, /model, /settings, /update, /help, /quit, /exit."),
                                         _=>{
                                             view.scroll=0;view.message(&format!("You\n{prompt}"));
                                             let running=session.take().context("Session unavailable")?;
@@ -849,7 +1033,7 @@ fn process_ram() -> Option<usize> {
 }
 
 /// Strip terminal-control characters from model output, tool output, file paths, and paste.
-fn visible(text: &str) -> String {
+pub(crate) fn visible(text: &str) -> String {
     text.chars()
         .filter_map(|c| match c {
             '\n' => Some(c),
@@ -881,9 +1065,13 @@ fn start_job(
     let token = cancel.clone();
     let (sender, mut steering) = mpsc::channel(32);
     let job = tokio::spawn(async move {
-        let result = session
-            .prompt_with_steering(prompt, events, token, &mut steering)
-            .await;
+        let result = if prompt == "/compact" {
+            session.compact(events, token).await
+        } else {
+            session
+                .prompt_with_steering(prompt, events, token, &mut steering)
+                .await
+        };
         (session, result, steering)
     });
     (job, cancel, sender)
@@ -902,6 +1090,8 @@ fn tool_summary(call: &ToolCall) -> String {
         .arguments
         .get(if call.name == "bash" {
             "command"
+        } else if call.name == "load_skill" {
+            "name"
         } else {
             "path"
         })
@@ -1050,9 +1240,58 @@ fn wrap_input(text: &str, cursor: usize, width: usize) -> (Vec<String>, usize, u
 mod tests {
     use super::*;
     #[test]
+    fn activity_animation_bounces_and_does_not_duplicate_status() {
+        assert_eq!(activity_ball(0), "●·····");
+        assert_eq!(activity_ball(5), "·····●");
+        assert_eq!(activity_ball(6), "····●·");
+        assert_eq!(activity_ball(10), activity_ball(0));
+        for frame in 0..10 {
+            assert_eq!(
+                activity_ball(frame).chars().filter(|c| *c == '●').count(),
+                1
+            );
+        }
+        let mut view = test_view();
+        view.event(Event::RunStarted);
+        assert!(view.prompt_title().contains("Thinking"));
+        assert!(!view.status_bar().contains("Thinking"));
+        assert!(view.status_bar().contains("cancel"));
+        view.event(Event::TextDelta("hello".into()));
+        assert!(view.prompt_title().contains("Responding"));
+        view.event(Event::ToolStarted(ToolCall {
+            id: "one".into(),
+            name: "bash".into(),
+            arguments: serde_json::json!({"command":"true"}),
+        }));
+        assert!(view.prompt_title().contains("Executing tool call: bash"));
+        view.event(Event::ToolFinished {
+            call_id: "one".into(),
+            output: "ok".into(),
+            is_error: false,
+        });
+        assert!(view.prompt_title().contains("Thinking"));
+        view.event(Event::CompactionStarted);
+        assert!(view.prompt_title().contains("Compacting"));
+        view.status = "Cancelling…".into();
+        assert_eq!(view.prompt_title(), "Cancelling…");
+        view.event(Event::RunFinished {
+            cancelled: true,
+            error: None,
+        });
+        view.status = "Ready".into();
+        assert!(view.prompt_title().starts_with("Prompt"));
+    }
+
+    #[test]
     fn settings_dialog_navigation_and_draft_validation() {
         let mut dialog = SettingsDialog {
-            fields: vec!["custom-model".into(), "32".into(), "1048576".into()],
+            fields: vec![
+                "custom-model".into(),
+                "32".into(),
+                "1048576".into(),
+                "80".into(),
+                "[\"~/.agents\",\".agents\"]".into(),
+            ],
             selected: 0,
             model_only: false,
             default_model: "default-model".into(),
@@ -1060,6 +1299,7 @@ mod tests {
             error: String::new(),
             preferences: Preferences::default(),
             confirm_yolo: false,
+            sticky_skills: true,
         };
         let key = |code, modifiers| KeyEvent::new(code, modifiers);
         dialog.key(key(KeyCode::Char('d'), KeyModifiers::CONTROL));
@@ -1075,6 +1315,15 @@ mod tests {
         dialog.selected = 3;
         dialog.key(key(KeyCode::Char(' '), KeyModifiers::NONE));
         assert!(dialog.preferences.yolo);
+        dialog.selected = 10;
+        dialog.key(key(KeyCode::Char(' '), KeyModifiers::NONE));
+        assert!(!dialog.sticky_skills);
+        dialog.selected = 11;
+        dialog.key(key(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        assert!(dialog.fields[4].is_empty());
+        dialog.key(key(KeyCode::Char('['), KeyModifiers::NONE));
+        dialog.key(key(KeyCode::Char(']'), KeyModifiers::NONE));
+        assert_eq!(dialog.fields[4], "[]");
         dialog.selected = 6;
         dialog.key(key(KeyCode::Right, KeyModifiers::NONE));
         assert!(!dialog.preferences.status_ram);
@@ -1095,6 +1344,7 @@ mod tests {
             status: "Ready".into(),
             title: String::new(),
             dialog: None,
+            inspector: None,
             preferences: Preferences::default(),
             model: "codex / custom".into(),
             context_used: 512,
@@ -1102,6 +1352,8 @@ mod tests {
             ram: Some(5 * 1048576),
             yolo_active: false,
             busy: false,
+            activity: Activity::default(),
+            animation_frame: 0,
             input_cursor: 0,
             details: None,
             details_scroll: 0,

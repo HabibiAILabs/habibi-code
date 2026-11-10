@@ -2,7 +2,7 @@
 
 A small, native Rust coding-agent prototype: **`libhabibi` owns the agent loop; `habibi` is its full-screen terminal frontend.** No JavaScript runtime, daemon, or provider-agent subprocess. A best-effort background GitHub release check is the only idle network activity; it never contacts model providers.
 
-## Install v0.1
+## Install v0.2
 
 Prebuilt Linux x86-64/ARM64 (static musl) and macOS 15+ Intel/Apple Silicon binaries are published on [GitHub Releases](https://github.com/habibiailabs/habibi-code/releases). macOS binaries are unsigned and not notarized.
 
@@ -15,7 +15,7 @@ The installer verifies SHA-256 checksums and atomically installs to `~/.local/bi
 ```sh
 # Pin a version or choose an absolute installation directory
 curl -fsSL https://habibiailabs.github.io/habibi-code/install.sh | \
-  HABIBI_VERSION=v0.1.0 HABIBI_INSTALL_DIR="$HOME/bin" sh
+  HABIBI_VERSION=v0.2.0 HABIBI_INSTALL_DIR="$HOME/bin" sh
 ```
 
 Run the same command to upgrade; remove the installed `habibi` binary to uninstall (saved sessions/credentials are not removed). The [website](https://habibiailabs.github.io/habibi-code/) has a quick start.
@@ -59,6 +59,47 @@ target/release/habibi logout codex
 
 `--resume` restores the saved model, provider, workspace, and history. It cannot be combined with overrides. Model availability depends on your account; use `--model` to override the defaults.
 
+### Agent Skills
+
+Habibi discovers [Agent Skills](https://agentskills.io) at session creation and resume.
+Put each skill in `<root>/<skill-name>/SKILL.md`, with YAML frontmatter containing
+`name` (matching the directory) and `description`, followed by Markdown instructions.
+The complete frontmatter (including optional fields) and skill path are automatically
+included in model context; the body is only included after the model calls
+`load_skill` with `{"name":"skill-name"}` and you approve it. Loading does not execute
+scripts or automatically read referenced files. Skill content is untrusted reference
+data, not a replacement for system instructions.
+
+The default directory list is `["~/.agents", ".agents"]`. `~` expands to your home
+and relative paths resolve against the workspace (`--cwd`, or the current directory).
+Each entry supports both `<entry>/<skill-name>/SKILL.md` and the conventional
+`<entry>/skills/<skill-name>/SKILL.md`. The latter wins within an entry; later entries
+win over earlier entries, so workspace skills override home skills by default.
+Discovery scans immediate child directories; malformed/unreadable skills are skipped.
+Files must be UTF-8 and at most 2 MiB. No skills are downloaded automatically.
+
+Edit **Skill directories (JSON list)** in `/settings`, for example:
+`["~/.agents", ".agents", "~/.claude/skills", "./team-skills"]`.
+The list is saved with the session and rediscovered immediately when you apply it.
+Repeatable `--skill-dir` arguments replace the default list for a new session:
+
+```sh
+habibi --skill-dir '~/.agents' --skill-dir .agents --skill-dir ./team-skills
+habibi --no-sticky-skills
+```
+
+**Sticky skills are ON by default.** Exact loaded snapshots stay outside compactable
+history and survive `--resume`, even if the source changes or disappears. This does
+not preload skill bodies. Toggle **Sticky skills** in `/settings`; when OFF, loaded
+bodies are ordinary tool results that may be summarized. Approved snapshots are saved
+so turning sticky back ON restores them without rereading changed files.
+Metadata and active sticky snapshots count toward the context byte budget; compaction
+cannot free those bytes. Increase the budget if retained skills leave too little room.
+Options are session-local and saved with the session; resume does not accept overrides.
+
+Library hosts can set `SessionConfig.skill_dirs` and `sticky_skills`; set
+`discover_skills = false` to disable discovery entirely.
+
 ### TUI
 
 - **Enter:** submit while idle; during a run, queue **steering** for the next safe model boundary (after the current response and its tool batch). Steering does not interrupt an in-flight HTTP request or tool.
@@ -68,25 +109,50 @@ target/release/habibi logout codex
 - **Esc:** interrupt the active run, including a pending approval, and clear queued messages. In settings it closes the dialog without saving. Already-completed tool effects are not undone. Errors also clear pending queues rather than automatically continuing.
 - **Ctrl-C:** cancel an active run; quit when idle.
 - **PgUp / PgDn or mouse wheel:** scroll the transcript or open argument inspector. Scrolling up keeps your reading position stable as output arrives; scroll back to the bottom to follow output again. Conversation roles, headings, bold text, inline code, and fenced code blocks have lightweight styling. Tools/results use compact summaries, with full content retained in the session journal. Thinking is shown as a compact activity indicator, never raw private reasoning.
-- **Ctrl-U:** clear input. **/help**, **/quit**, **/model**, **/settings**.
+- **Ctrl-U:** clear input. **/help**, **/quit**, **/model**, **/settings**, **/compact**.
+- **Activity animation:** while running, the prompt border shows a bouncing ball with **Thinking**, **Responding**, **Executing tool call: <name>**, or **Compacting context**. It pauses for approvals and stops when idle. The footer keeps safety/cancellation hints without repeating the activity label.
+- **/inspect:** open a read-only context and tool-call inspector while idle (see below).
 - **/model:** edit the current provider’s model ID in a modal; Ctrl-D restores the provider default. Custom IDs are supported; availability depends on your account.
-- **/settings:** edit model, maximum model turns per prompt, and context budget in bytes. Tab/Up/Down selects a field, Ctrl-U clears it, Enter validates and applies, and Esc discards the draft. Settings are session-local and restored by `--resume`; provider and workspace remain fixed. Changes are available only while idle.
-- **Status bar:** `/settings` lets you toggle activity, model, RAM, context, and keyboard hints individually using Space or Left/Right. Current-process resident RAM refreshes once a second on Linux (`n/a` elsewhere); child-process memory is not included. Context reports serialized conversation bytes used / configured limit and percentage, **not provider tokens or the actual model context window**. Usage updates as conversation messages are committed, not per streamed token.
-- **Tool permissions:** `/settings` selects **Ask every time** (default) or **YOLO** (auto-approve every tool, including reads, edits, writes, and unsandboxed shell commands). Enabling YOLO requires a second Enter to confirm the warning. The preference is saved, but after a restart/resume YOLO stays **inactive** until you confirm it again in `/settings`. YOLO and active approval/cancellation indicators cannot be hidden by status-bar toggles. Only enable it for trusted work; shell commands retain your account’s filesystem/network access.
+- **/settings:** edit model, maximum model turns per prompt (**0 = unlimited**, the default), context budget in bytes, auto-compaction percentage (default **80%**, **0** disables it), sticky skills, and the skill directory list. Tab/Up/Down selects a field, Ctrl-U clears it, Enter validates and applies, and Esc discards the draft. Settings are session-local and restored by `--resume`; provider and workspace remain fixed. Changes are available only while idle.
+- **Status bar:** `/settings` lets you toggle activity, model, RAM, context, and keyboard hints individually using Space or Left/Right. Current-process resident RAM refreshes once a second on Linux (`n/a` elsewhere); child-process memory is not included. Context reports serialized conversation plus skill-context bytes used / configured limit and percentage, **not provider tokens or the actual model context window**. Usage updates as conversation messages are committed, not per streamed token.
+- **Tool permissions:** `/settings` selects **Ask every time** (default) or **YOLO** (auto-approve every tool, including reads, edits, writes, and unsandboxed shell commands). Enabling YOLO requires a second Enter to confirm the warning. The preference is saved with the session and **automatically restored on resume**, without another confirmation. New sessions default to Ask. YOLO and active approval/cancellation indicators cannot be hidden by status-bar toggles. Only enable it for trusted work; shell commands retain your account’s filesystem/network access.
 
 Approval previews over 24 KiB are explicitly truncated; do not approve a change you cannot evaluate. The composer is a bounded multiline editor, not a full terminal-editor implementation.
+
+### Context and tool-call inspector
+
+Run **`/inspect`** while idle to open a two-tab modal:
+
+- **Context:** budget usage with a proportional breakdown, system prompt, skills catalog
+  and sticky snapshots, tool definitions, and each active conversation message.
+  Sizes are bytes, not tokens. System prompt and schema overhead are outside the
+  harness's conversation/skills budget. Provider-native blocks count toward message
+  sizes but are not displayed; this is not an exact provider wire-payload viewer.
+- **Tool calls:** shows calls since the latest user message by default, newest first.
+  Press **a** to toggle all calls for the session, including calls before compaction.
+  Select a call to view its arguments, recorded result, success/error status, and
+  current tool definition. Recorded results retain the execution tool's own output
+  limits. Calls without results are marked pending/interrupted. History survives
+  resume and is kept outside model context; browsing it does not undo compaction.
+
+**Tab**, **1**, or **2** switches tabs; **↑/↓** or **j/k** selects entries;
+**PgUp/PgDn** or the mouse wheel scrolls details. **/** searches labels and content,
+**Enter** finishes entering the search, and **c** clears it. **Esc/q** closes the
+modal (Esc first leaves search input when searching). Inspection never executes or
+approves tools and does not send requests to a provider. F2 remains the separate
+approval inspector during a run.
 
 ## Native core
 
 - Direct streaming model requests to the ChatGPT Codex backend and Anthropic Messages endpoint.
 - OAuth PKCE, callback state checks, refresh-token rotation, and cross-process refresh locking.
-- Four built-in tools: `read`, `write`, exact single-match `edit`, and `bash`.
+- Built-in workspace tools: `read`, `write`, exact single-match `edit`, and `bash`.
 - Tools run sequentially. File writes use atomic replacement. Reads/writes are limited to 2 MiB; shell output is captured, drained, and bounded to 64 KiB per stream.
 - Cancellation drops HTTP requests and kills shell process groups on Unix, including descendants. Already-completed edits are not undone; in-progress atomic file operations finish before cancellation returns.
 - Private append-only JSONL sessions, exclusive session locks, resume, torn-tail recovery, and interrupted-tool-result repair.
 - Bounded event channels and terminal transcript. Terminal control characters are removed from displayed output.
 
-The default run limit is 32 model turns per prompt. The default context limit is 1 MiB of serialized transcript, **not a token estimate**. The agent stops explicitly at that limit; it does not silently discard history.
+Runs have no model-turn limit by default. Set a positive maximum in `/settings` to cap turns per prompt; **0** means unlimited. Existing saved sessions retain their configured limit. The default context limit is 1 MiB of serialized transcript, **not a token estimate**. Before a model turn, the agent automatically summarizes at the configured percentage (80% by default). Use **/compact** while idle to manually summarize, including after `habibi --resume SESSION.jsonl`, then submit your next prompt to continue. Compaction uses the selected provider/model with tools disabled and replaces active history with a continuation summary; original records remain in the journal. Settings and summary checkpoints survive resume. Summary generation is lossy and requires working provider access; a failed/cancelled summary leaves history unchanged. The byte budget is not the provider context window: if the provider already rejects the history as too large, summarization may also fail. With auto-compaction off, exceeding the budget stops the run explicitly.
 
 ### Subscription caveat
 
@@ -165,7 +231,7 @@ These include process launch; first paint includes local session creation. They 
 
 ## Deliberately absent
 
-Plugins, embedded scripting, MCP, subagents, repository indexing, automatic compaction/retries, custom tool registration, API-key providers, and streaming shell output. Add these only when an actual workflow justifies their cost. The public Rust API and journal format are prototype-level and may change.
+Plugins, embedded scripting, MCP, subagents, repository indexing, automatic retries, custom tool registration, API-key providers, and streaming shell output. Add these only when an actual workflow justifies their cost. The public Rust API and journal format are prototype-level and may change.
 
 ## CI and releases
 

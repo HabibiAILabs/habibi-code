@@ -1,3 +1,4 @@
+mod inspect;
 mod login;
 mod tui;
 mod update;
@@ -8,7 +9,7 @@ use libhabibi::{
 };
 use std::{io::IsTerminal, path::PathBuf};
 
-const HELP: &str = "habibi — a native Rust coding agent (experimental)\n\nUsage:\n  habibi [--provider codex|claude] [--model ID] [--cwd DIR]\n  habibi --resume SESSION.jsonl\n  habibi login codex|claude\n  habibi logout codex|claude\n\nSubscriptions use direct OAuth/model requests, never provider agent subprocesses.\nAdapters are experimental and not guaranteed provider-approved.\nTools ask by default; /settings offers explicit YOLO auto-approval. Shell commands are NOT sandboxed.\n\nTUI: Enter submit/steer; Alt-Enter follow-up; Ctrl-Enter/Ctrl-J newline; PgUp/PgDn scroll; Esc interrupt; Ctrl-C cancel or quit.\nCommands: /model, /settings, /update, /quit, /help. Use login before requesting a model response.\n";
+const HELP: &str = "habibi — a native Rust coding agent (experimental)\n\nUsage:\n  habibi [--provider codex|claude] [--model ID] [--cwd DIR] [--skill-dir DIR] [--no-sticky-skills]\n  habibi --resume SESSION.jsonl\n  habibi login codex|claude\n  habibi logout codex|claude\n\nSubscriptions use direct OAuth/model requests, never provider agent subprocesses.\nAdapters are experimental and not guaranteed provider-approved.\nTools ask by default; /settings offers explicit YOLO auto-approval. Shell commands are NOT sandboxed.\n\nTUI: Enter submit/steer; Alt-Enter follow-up; Ctrl-Enter/Ctrl-J newline; PgUp/PgDn scroll; Esc interrupt; Ctrl-C cancel or quit.\nCommands: /inspect, /compact, /model, /settings, /update, /quit, /help. Use login before requesting a model response.\n";
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
@@ -61,6 +62,10 @@ async fn main() -> Result<()> {
         if let Some(model) = options.model {
             config.model = model
         }
+        config.sticky_skills = options.sticky_skills;
+        if !options.skill_dirs.is_empty() {
+            config.skill_dirs = options.skill_dirs;
+        }
         let mut session = Session::new(config, auth)?;
         let path = base_dir("XDG_DATA_HOME", ".local/share")?
             .join(format!("habibi/sessions/{}.jsonl", session.id()));
@@ -83,6 +88,8 @@ fn base_dir(variable: &str, fallback: &str) -> Result<PathBuf> {
 }
 
 struct Options {
+    sticky_skills: bool,
+    skill_dirs: Vec<PathBuf>,
     provider: Provider,
     model: Option<String>,
     cwd: PathBuf,
@@ -91,6 +98,8 @@ struct Options {
 impl Options {
     fn parse(args: &[String]) -> Result<Self> {
         let mut options = Self {
+            sticky_skills: true,
+            skill_dirs: Vec::new(),
             provider: Provider::Codex,
             model: None,
             cwd: std::env::current_dir()?,
@@ -99,8 +108,13 @@ impl Options {
         let mut changed = false;
         let mut args = args.iter();
         while let Some(flag) = args.next() {
+            if flag == "--sticky-skills" || flag == "--no-sticky-skills" {
+                options.sticky_skills = flag == "--sticky-skills";
+                changed = true;
+                continue;
+            }
             let value = match flag.as_str() {
-                "--provider" | "--model" | "--cwd" | "--resume" => args
+                "--provider" | "--model" | "--cwd" | "--resume" | "--skill-dir" => args
                     .next()
                     .with_context(|| format!("Missing value for {flag}"))?,
                 _ => bail!("Unknown argument {flag}; use --help"),
@@ -116,6 +130,10 @@ impl Options {
                 }
                 "--cwd" => {
                     options.cwd = PathBuf::from(value);
+                    changed = true;
+                }
+                "--skill-dir" => {
+                    options.skill_dirs.push(PathBuf::from(value));
                     changed = true;
                 }
                 "--resume" => options.resume = Some(PathBuf::from(value)),
@@ -137,6 +155,21 @@ mod tests {
     fn rejects_ambiguous_or_incomplete_arguments() {
         let parse =
             |s: &[&str]| Options::parse(&s.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert!(parse(&["--skill-dir"]).is_err());
+        assert!(parse(&["--resume", "session", "--sticky-skills"]).is_err());
+        let skills = parse(&[
+            "--sticky-skills",
+            "--skill-dir",
+            "one",
+            "--skill-dir",
+            "two",
+        ])
+        .unwrap();
+        assert!(skills.sticky_skills);
+        assert_eq!(
+            skills.skill_dirs,
+            vec![PathBuf::from("one"), PathBuf::from("two")]
+        );
         assert!(parse(&["--provider"]).is_err());
         assert!(parse(&["--unknown", "x"]).is_err());
         assert!(parse(&["--resume", "session", "--model", "x"]).is_err());
