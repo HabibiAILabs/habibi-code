@@ -13,7 +13,7 @@ tokio-util.workspace = true
 base64 = "0.22"
 futures-util = "0.3"
 libc = "0.2"
-rand = "0.8"
+rand = "0.10"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
 sha2 = "0.10"
 url = "2"
