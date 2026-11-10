@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="description" content="Habibi — a small native Rust coding agent. Your terminal, your tools, your control. Linux and macOS.">
+<meta name="theme-color" content="#101817">
+<title>Habibi — your terminal, your agent</title>
+<style>
+:root{color-scheme:dark;--bg:#101817;--card:#182421;--fg:#e9f3e9;--muted:#adc2b7;--accent:#a9e8ba}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:17px/1.65 system-ui,sans-serif}main,header,footer{max-width:1000px;margin:auto;padding:28px}header{display:flex;justify-content:space-between;align-items:center}a{color:var(--accent);text-underline-offset:4px}nav{display:flex;gap:24px}.brand{font-weight:800;font-size:22px;letter-spacing:-.04em;text-decoration:none}section{margin:64px 0}.eyebrow{color:var(--accent);font-size:14px;text-transform:uppercase;letter-spacing:.12em}h1{font-size:clamp(42px,7vw,78px);line-height:1.06;letter-spacing:-.06em;max-width:800px;margin:20px 0}h2{letter-spacing:-.03em;font-size:30px}h3{margin:0 0 8px}p{max-width:760px;color:var(--muted)}.lead{font-size:21px}.install,article{background:var(--card);border:1px solid #30453b;border-radius:14px;padding:24px}.install{margin-top:36px}code,pre{font:14px/1.8 ui-monospace,SFMono-Regular,Consolas,monospace}pre{overflow:auto;margin:0;padding:8px 0;white-space:pre}code{color:var(--accent)}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:18px}article p{font-size:15px;margin-bottom:0}.small{font-size:14px}.pill{border:1px solid #496451;border-radius:20px;padding:4px 12px;font-size:13px}.warning{border-left:3px solid #dfc083;padding-left:20px}footer{border-top:1px solid #30453b;color:var(--muted);font-size:14px;margin-top:80px}table{border-collapse:collapse;width:100%;font-size:15px}td,th{text-align:left;border-bottom:1px solid #30453b;padding:12px 8px}a:focus-visible{outline:2px solid var(--accent);outline-offset:5px}@media(max-width:540px){header,main,footer{padding:20px}nav{gap:12px;font-size:14px}.install{padding:16px}section{margin:44px 0}}
+</style>
+</head>
+<body>
+<header><a class="brand" href="./">habibi<span aria-hidden="true">.</span></a><nav aria-label="Main navigation"><a href="https://github.com/habibiailabs/habibi-code">GitHub</a><a href="https://github.com/habibiailabs/habibi-code/releases">Releases</a></nav></header>
+<main>
+<section aria-labelledby="hero"><span class="eyebrow">Native Rust · Linux + macOS</span><h1 id="hero">Your terminal.<br>Your agent.<br>Your call.</h1><p class="lead">A small coding agent that owns its loop, speaks directly to models, and keeps you in control of every tool.</p><span class="pill">v0.1.0 · experimental</span>
+<div class="install"><strong>Install with one command</strong><pre><code>curl -fsSL https://habibiailabs.github.io/habibi-code/install.sh | sh</code></pre><p class="small">Installs to <code>~/.local/bin</code>. No sudo. SHA-256 verified. <a href="install.sh">Read the installer first</a> or <a href="https://github.com/habibiailabs/habibi-code/releases/latest">download an archive</a>.</p></div></section>
+<section aria-labelledby="features"><h2 id="features">Less machinery. More agency.</h2><div class="grid"><article><h3>Native all the way</h3><p>A Rust binary and an embeddable engine. No Node.js runtime, daemon, or provider-agent subprocess.</p></article><article><h3>A conversation, not a log dump</h3><p>Compact tool summaries, styled responses, scrollback, multiline input, and configurable status elements.</p></article><article><h3>Stay in the loop</h3><p>Steer an active run, queue follow-ups, interrupt with Esc, and resume your saved session later.</p></article><article><h3>Your permission policy</h3><p>Approve each tool by default. Explicit YOLO mode is available for trusted work—approval is not a sandbox.</p></article></div></section>
+<section aria-labelledby="start"><h2 id="start">Start a session</h2><div class="install"><pre><code>habibi login codex
+habibi --provider codex
+
+# Experimental Claude subscription adapter
+habibi login claude
+habibi --provider claude
+
+# Pick up where you left off
+habibi --resume /path/to/session.jsonl</code></pre></div><p class="small">Open the login URL in your browser. For SSH, paste the failed callback URL into the private login prompt—not chat. Account access and model availability are controlled by the provider.</p></section>
+<section aria-labelledby="platforms"><h2 id="platforms">Pick your machine</h2><table><thead><tr><th scope="col">Platform</th><th scope="col">Builds</th></tr></thead><tbody><tr><td>Linux</td><td>x86-64 + ARM64 · static musl</td></tr><tr><td>macOS</td><td>Intel + Apple Silicon · unsigned, not notarized</td></tr></tbody></table><p class="small">Run the installer again to upgrade. A background release check shows a minimal notice when a newer stable version is available; nothing is installed automatically. Set <code>HABIBI_NO_UPDATE_CHECK=1</code> to disable it.</p></section>
+<section class="warning" aria-labelledby="caveat"><h2 id="caveat">An honest first release</h2><p>Subscription adapters are experimental, not verified provider-approved integrations. Real-account authentication and inference have not yet been verified for this prototype. Claude compatibility uses Claude Code-specific identity. Review provider terms. There is no automatic API-billing fallback.</p><p>Shell commands run with your account’s access. Saved credentials and sessions are plaintext and may contain sensitive data. Only approve operations you trust.</p><a href="https://github.com/habibiailabs/habibi-code#readme">Read the full documentation →</a></section>
+</main><footer>Habibi AI Labs · <a href="https://github.com/habibiailabs/habibi-code/issues">Report an issue</a> · Small by design.</footer>
+</body></html>

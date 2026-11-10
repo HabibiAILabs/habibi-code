@@ -1,0 +1,8 @@
+/target/
+/_site/
+/dist/
+/stage/
+__pycache__/
+.DS_Store
+.env
+.env.*
