@@ -2,6 +2,26 @@
 
 A small, native Rust coding-agent prototype: **`libhabibi` owns the agent loop; `habibi` is its full-screen terminal frontend.** No JavaScript runtime, daemon, or provider-agent subprocess. A best-effort background GitHub release check is the only idle network activity; it never contacts model providers.
 
+## What's new in v0.2.0
+
+[Release notes and downloads](https://github.com/HabibiAILabs/habibi-code/releases/tag/v0.2.0) · [Quick-start website](https://habibiailabs.github.io/habibi-code/)
+
+- **[Agent Skills](#agent-skills):** automatic frontmatter discovery from `~/.agents` and workspace `.agents`, approval-gated `load_skill`, configurable search directories, and sticky instructions **ON by default**.
+- **[Context and tool-call inspector](#context-and-tool-call-inspector):** `/inspect` opens searchable tabs for active context and recorded tool calls, with latest/all scope and history across compaction/resume.
+- **[Compaction](#native-core):** `/compact` and automatic summarization at 80% of the byte budget, with original journal records retained.
+- **Animated activity:** a bouncing ball in the prompt border shows thinking, responses, tools, and compaction without duplicating the label in the footer.
+- **Unlimited turns by default:** `/settings` uses **0 = unlimited**; existing sessions retain their saved turn cap.
+- **Session-persistent YOLO:** after initial confirmation, saved YOLO mode is **active immediately on resume**. Disable it in `/settings` if you want per-tool approval again.
+
+### Upgrading from v0.1.0
+
+Run the installer below again, then restart Habibi. Existing v0.1.0 sessions are readable,
+but journals updated by v0.2.0 contain new record types: use **v0.2.0 or later** to
+resume them. Back up a journal before opening it if you need to retain downgrade access.
+Settings remain **per session**, not global preferences. In particular, a saved YOLO
+preference from v0.1.0 is now automatically restored as active; shell commands are
+still unsandboxed and retain your account's filesystem/network access.
+
 ## Install v0.2
 
 Prebuilt Linux x86-64/ARM64 (static musl) and macOS 15+ Intel/Apple Silicon binaries are published on [GitHub Releases](https://github.com/habibiailabs/habibi-code/releases). macOS binaries are unsigned and not notarized.
@@ -109,7 +129,7 @@ Library hosts can set `SessionConfig.skill_dirs` and `sticky_skills`; set
 - **Esc:** interrupt the active run, including a pending approval, and clear queued messages. In settings it closes the dialog without saving. Already-completed tool effects are not undone. Errors also clear pending queues rather than automatically continuing.
 - **Ctrl-C:** cancel an active run; quit when idle.
 - **PgUp / PgDn or mouse wheel:** scroll the transcript or open argument inspector. Scrolling up keeps your reading position stable as output arrives; scroll back to the bottom to follow output again. Conversation roles, headings, bold text, inline code, and fenced code blocks have lightweight styling. Tools/results use compact summaries, with full content retained in the session journal. Thinking is shown as a compact activity indicator, never raw private reasoning.
-- **Ctrl-U:** clear input. **/help**, **/quit**, **/model**, **/settings**, **/compact**.
+- **Ctrl-U:** clear input. **/help**, **/quit**, **/model**, **/settings**, **/compact**, **/inspect**.
 - **Activity animation:** while running, the prompt border shows a bouncing ball with **Thinking**, **Responding**, **Executing tool call: <name>**, or **Compacting context**. It pauses for approvals and stops when idle. The footer keeps safety/cancellation hints without repeating the activity label.
 - **/inspect:** open a read-only context and tool-call inspector while idle (see below).
 - **/model:** edit the current provider’s model ID in a modal; Ctrl-D restores the provider default. Custom IDs are supported; availability depends on your account.
