@@ -337,7 +337,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let mut operation = Box::pin(shell(
             temp.path(),
-            "printf ready > ready; (sleep 0.3; printf bad > survived) & wait",
+            "(printf ready > ready; while [ ! -e release ]; do sleep 0.01; done; printf bad > survived) & wait",
         ));
         tokio::time::timeout(Duration::from_secs(3), async {
             loop {
@@ -349,7 +349,10 @@ mod tests {
                 }
             }
         }).await.unwrap();
+        // Release the descendant only AFTER cancellation. A fixed sleep before its
+        // write can expire before this runtime is scheduled on a loaded CI runner.
         drop(operation);
+        fs::write(temp.path().join("release"), "go").unwrap();
         tokio::time::sleep(Duration::from_millis(500)).await;
         assert!(!temp.path().join("survived").exists());
     }
