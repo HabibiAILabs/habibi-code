@@ -1,28 +1,36 @@
 # Habibi
 
-A small, native Rust coding-agent prototype: **`libhabibi` owns the agent loop; `habibi` is its full-screen terminal frontend.** No JavaScript runtime, daemon, or provider-agent subprocess. A best-effort background GitHub release check is the only idle network activity; it never contacts model providers.
+A small, native Rust coding-agent prototype: **`libhabibi` owns the agent loop; `habibi` is its full-screen terminal frontend.** No JavaScript runtime, Habibi daemon, or provider-agent subprocess (Ollama runs as a separate server). A best-effort background GitHub release check is the only idle network activity; it never contacts model providers.
 
-## What's new in v0.2.0
+## What's new in v0.3.0
 
-[Release notes and downloads](https://github.com/HabibiAILabs/habibi-code/releases/tag/v0.2.0) · [Quick-start website](https://habibiailabs.github.io/habibi-code/)
+[Release notes](RELEASE_NOTES.md) · [Quick-start website](https://habibiailabs.github.io/habibi-code/)
 
-- **[Agent Skills](#agent-skills):** automatic frontmatter discovery from `~/.agents` and workspace `.agents`, approval-gated `load_skill`, configurable search directories, and sticky instructions **ON by default**.
-- **[Context and tool-call inspector](#context-and-tool-call-inspector):** `/inspect` opens searchable tabs for active context and recorded tool calls, with latest/all scope and history across compaction/resume.
-- **[Compaction](#native-core):** `/compact` and automatic summarization at 80% of the byte budget, with original journal records retained.
-- **Animated activity:** a bouncing ball in the prompt border shows thinking, responses, tools, and compaction without duplicating the label in the footer.
-- **Unlimited turns by default:** `/settings` uses **0 = unlimited**; existing sessions retain their saved turn cap.
-- **Session-persistent YOLO:** after initial confirmation, saved YOLO mode is **active immediately on resume**. Disable it in `/settings` if you want per-tool approval again.
+- **Ollama:** native local chat streaming and tool calls, no OAuth or automatic model downloads.
+- **Current subscription model choices:** bundled Codex/Claude lists, `/models` to browse,
+  and Ctrl-N/P in `/model` to select. New-install defaults are `gpt-6.1-sol` and
+  `claude-sonnet-5-5`. Existing saved model IDs are preserved.
+- **Persistent user defaults:** default provider, model per provider, and frontend
+  preferences (including explicitly enabled YOLO) follow you into new sessions in
+  every directory. Resumed sessions retain their saved settings.
+- **Rex / OSC 7501:** terminal status reports for working, approval/authentication waits,
+  completion, errors, and cancellation.
+- Agent Skills, `/inspect`, manual/automatic compaction, steering, and follow-ups
+  remain available. Tools ask by default unless you have explicitly saved YOLO.
 
-### Upgrading from v0.1.0
+### Upgrading from v0.2.0
 
-Run the installer below again, then restart Habibi. Existing v0.1.0 sessions are readable,
-but journals updated by v0.2.0 contain new record types: use **v0.2.0 or later** to
-resume them. Back up a journal before opening it if you need to retain downgrade access.
-Settings remain **per session**, not global preferences. In particular, a saved YOLO
-preference from v0.1.0 is now automatically restored as active; shell commands are
-still unsandboxed and retain your account's filesystem/network access.
+Rebuild or reinstall after the release is published. Existing journals remain readable.
+Ollama journals require v0.3.0 or later; do not resume them with older binaries.
+Apply `/model` or `/settings` once to establish user defaults; we do not silently
+promote a resumed session's permission policy to global defaults.
 
-## Install v0.2
+**YOLO is now a user default for new sessions when you enable it in `/settings`.**
+The confirmation explicitly warns that this applies in all directories. Disable
+it and Apply to restore Ask for future sessions. Existing journals retain their
+own saved permission mode, including on resume. Shell commands are unsandboxed.
+
+## Install v0.3
 
 Prebuilt Linux x86-64/ARM64 (static musl) and macOS 15+ Intel/Apple Silicon binaries are published on [GitHub Releases](https://github.com/habibiailabs/habibi-code/releases). macOS binaries are unsigned and not notarized.
 
@@ -35,7 +43,7 @@ The installer verifies SHA-256 checksums and atomically installs to `~/.local/bi
 ```sh
 # Pin a version or choose an absolute installation directory
 curl -fsSL https://habibiailabs.github.io/habibi-code/install.sh | \
-  HABIBI_VERSION=v0.2.0 HABIBI_INSTALL_DIR="$HOME/bin" sh
+  HABIBI_VERSION=v0.3.0 HABIBI_INSTALL_DIR="$HOME/bin" sh
 ```
 
 Run the same command to upgrade; remove the installed `habibi` binary to uninstall (saved sessions/credentials are not removed). The [website](https://habibiailabs.github.io/habibi-code/) has a quick start.
@@ -71,13 +79,74 @@ Login prints a browser URL and waits up to five minutes for either a loopback ca
 The local callback listener remains active while waiting for pasted input. `code#state` is also accepted; a bare code is rejected because it cannot verify OAuth state. The redirect address and state must match this specific login attempt. Esc or Ctrl-C cancels; Ctrl-U clears the hidden input. For a stale or invalid callback, restart login and use the newly printed URL. Never paste callback URLs or authorization codes into chat.
 
 ```sh
-target/release/habibi --provider codex --model gpt-5.3-codex --cwd /path/to/project
-target/release/habibi --provider claude --model claude-sonnet-4-6
+target/release/habibi --provider codex --model gpt-6.1-sol --cwd /path/to/project
+target/release/habibi --provider claude --model claude-sonnet-5-5
 target/release/habibi --resume /path/to/session.jsonl
 target/release/habibi logout codex
 ```
 
 `--resume` restores the saved model, provider, workspace, and history. It cannot be combined with overrides. Model availability depends on your account; use `--model` to override the defaults.
+
+### Ollama and model choices
+
+```sh
+# In another terminal, if Ollama is not already running:
+ollama serve
+
+# Download a tool-capable model yourself (Habibi never does this automatically):
+ollama pull qwen3:8b
+habibi models ollama
+habibi --provider ollama --model qwen3:8b
+
+# Optional remote server (the endpoint is saved in the session journal):
+habibi --provider ollama --ollama-url http://your-server:11434 --model YOUR_MODEL
+habibi models ollama --ollama-url http://your-server:11434
+
+# Bundled subscription choices; no login/network needed to list:
+habibi models
+habibi models codex
+habibi models claude
+```
+
+`/models` lists choices for the active provider. For Ollama, `/models` and `/model`
+explicitly discover installed models from the configured server; discovery does not
+load or download them. In the model field, **Ctrl-N/P** cycles choices, typing allows
+any ID, and Enter applies and saves a default. Provider changes require a new session
+because native conversation formats differ.
+
+Ollama defaults to `http://127.0.0.1:11434` and `qwen3:8b`. URL precedence for new
+sessions is `--ollama-url`, then `OLLAMA_HOST` (a full HTTP(S) URL), then the saved
+Ollama URL, then localhost. Applying `/model` or `/settings` while using Ollama saves
+its URL as well. Resume always uses the journaled URL, not environment overrides.
+Remote Ollama servers receive prompts, file contents and tool results: use only a
+trusted endpoint, with HTTPS outside trusted local networks. No subscription
+credentials are sent to Ollama. Servers requiring authentication are not supported.
+
+Bundled subscription choices were checked on **2026-11-11** against
+[Pi's ChatGPT OAuth catalog](https://github.com/badlogic/pi-mono/blob/main/packages/ai/catalog/providers/openai-codex.ts)
+and [Claude's model documentation](https://platform.claude.com/docs/en/about-claude/models/overview).
+Codex choices use Pi's subscription-specific list, not OpenAI's API-billing catalog.
+Claude names are documented model IDs, **not a guarantee of OAuth/account access**.
+There is no hosted catalog or automatic catalog refresh. See [provider notes](docs/providers.md).
+
+### Persistent user defaults
+
+Applying `/model` saves the model as your default for that provider and selects that
+provider for future launches. Applying `/settings` also saves frontend preferences,
+including YOLO, for **new sessions in every directory**. Defaults are stored at
+`$XDG_CONFIG_HOME/habibi/settings.json` (or `~/.config/habibi/settings.json`).
+Model defaults are tracked separately for Codex, Claude, and Ollama.
+
+Explicit `--provider` and `--model` flags override defaults for that launch without
+rewriting them. Resumed sessions retain their journaled settings rather than taking
+new user defaults. Other settings (context budget, turn limit, compaction and skills)
+remain session-local.
+
+**YOLO is a global opt-in for new sessions:** the confirmation warns that all tools
+will be auto-approved in future sessions, regardless of directory. To turn it off
+for future sessions, disable it in `/settings` and Apply. Existing sessions retain
+their own saved permission mode; disable it separately when resuming those sessions.
+Changing only `/model` never changes your global permission preferences.
 
 ### Agent Skills
 
@@ -129,15 +198,31 @@ Library hosts can set `SessionConfig.skill_dirs` and `sticky_skills`; set
 - **Esc:** interrupt the active run, including a pending approval, and clear queued messages. In settings it closes the dialog without saving. Already-completed tool effects are not undone. Errors also clear pending queues rather than automatically continuing.
 - **Ctrl-C:** cancel an active run; quit when idle.
 - **PgUp / PgDn or mouse wheel:** scroll the transcript or open argument inspector. Scrolling up keeps your reading position stable as output arrives; scroll back to the bottom to follow output again. Conversation roles, headings, bold text, inline code, and fenced code blocks have lightweight styling. Tools/results use compact summaries, with full content retained in the session journal. Thinking is shown as a compact activity indicator, never raw private reasoning.
-- **Ctrl-U:** clear input. **/help**, **/quit**, **/model**, **/settings**, **/compact**, **/inspect**.
+- **Ctrl-U:** clear input. **/help**, **/quit**, **/models**, **/model**, **/settings**, **/compact**, **/inspect**.
 - **Activity animation:** while running, the prompt border shows a bouncing ball with **Thinking**, **Responding**, **Executing tool call: <name>**, or **Compacting context**. It pauses for approvals and stops when idle. The footer keeps safety/cancellation hints without repeating the activity label.
 - **/inspect:** open a read-only context and tool-call inspector while idle (see below).
-- **/model:** edit the current provider’s model ID in a modal; Ctrl-D restores the provider default. Custom IDs are supported; availability depends on your account.
-- **/settings:** edit model, maximum model turns per prompt (**0 = unlimited**, the default), context budget in bytes, auto-compaction percentage (default **80%**, **0** disables it), sticky skills, and the skill directory list. Tab/Up/Down selects a field, Ctrl-U clears it, Enter validates and applies, and Esc discards the draft. Settings are session-local and restored by `--resume`; provider and workspace remain fixed. Changes are available only while idle.
+- **/models:** list bundled subscription choices or discover installed Ollama models.
+- **/model:** choose with Ctrl-N/P or type a model ID in a modal; Ctrl-D restores the bundled provider default. Enter saves a default for future new sessions. Custom IDs are supported; availability depends on your account/server.
+- **/settings:** edit model, maximum model turns per prompt (**0 = unlimited**, the default), context budget in bytes, auto-compaction percentage (default **80%**, **0** disables it), sticky skills, and the skill directory list. Tab/Up/Down selects a field, Ctrl-U clears it, Enter validates and applies, and Esc discards the draft. Model and frontend preferences also become user defaults; other settings remain session-local. `--resume` restores journaled settings; provider and workspace remain fixed. Changes are available only while idle.
 - **Status bar:** `/settings` lets you toggle activity, model, RAM, context, and keyboard hints individually using Space or Left/Right. Current-process resident RAM refreshes once a second on Linux (`n/a` elsewhere); child-process memory is not included. Context reports serialized conversation plus skill-context bytes used / configured limit and percentage, **not provider tokens or the actual model context window**. Usage updates as conversation messages are committed, not per streamed token.
-- **Tool permissions:** `/settings` selects **Ask every time** (default) or **YOLO** (auto-approve every tool, including reads, edits, writes, and unsandboxed shell commands). Enabling YOLO requires a second Enter to confirm the warning. The preference is saved with the session and **automatically restored on resume**, without another confirmation. New sessions default to Ask. YOLO and active approval/cancellation indicators cannot be hidden by status-bar toggles. Only enable it for trusted work; shell commands retain your account’s filesystem/network access.
+- **Tool permissions:** `/settings` selects **Ask every time** (default) or **YOLO** (auto-approve every tool, including reads, edits, writes, and unsandboxed shell commands). Enabling YOLO requires a second Enter to confirm the warning. The preference is saved with the session and **automatically restored on resume**, without another confirmation. New sessions default to Ask unless you explicitly saved YOLO in `/settings`. YOLO and active approval/cancellation indicators cannot be hidden by status-bar toggles. Only enable it for trusted work; shell commands retain your account’s filesystem/network access.
 
 Approval previews over 24 KiB are explicitly truncated; do not approve a change you cannot evaluate. The composer is a bounded multiline editor, not a full terminal-editor implementation.
+
+### Terminal status (Rex and OSC 7501)
+
+Habibi supports the [Program Status Protocol](https://www.superlogical.com/rex/docs/build/program-status)
+(OSC 7501, revision 0.4). The TUI reports idle, working (thinking/responding/tools/
+compaction), blocked for tool approval, done, and error. Cancellation reports idle;
+subscription login reports blocked with kind `auth`. Completion/error records remain
+available for the terminal to show until acknowledged or replaced.
+
+Reports use the `habibi` record ID and fixed, base64-encoded messages. No prompt,
+response, tool arguments, file paths, credentials, or provider error details are sent
+as status metadata. Repeated reports are deduplicated and no feature-detection query
+is sent. Unsupported terminals should ignore the OSC. Reports are disabled when
+stdout is not a terminal; set `HABIBI_NO_PROGRAM_STATUS=1` to disable them explicitly.
+The library never emits terminal status sequences.
 
 ### Context and tool-call inspector
 
@@ -164,7 +249,7 @@ approval inspector during a run.
 
 ## Native core
 
-- Direct streaming model requests to the ChatGPT Codex backend and Anthropic Messages endpoint.
+- Direct streaming model requests to the ChatGPT Codex backend, Anthropic Messages endpoint, and native Ollama chat endpoint.
 - OAuth PKCE, callback state checks, refresh-token rotation, and cross-process refresh locking.
 - Built-in workspace tools: `read`, `write`, exact single-match `edit`, and `bash`.
 - Tools run sequentially. File writes use atomic replacement. Reads/writes are limited to 2 MiB; shell output is captured, drained, and bounded to 64 KiB per stream.
@@ -176,7 +261,7 @@ Runs have no model-turn limit by default. Set a positive maximum in `/settings` 
 
 ### Subscription caveat
 
-**These are experimental direct adapters, not verified provider-approved integrations. Live subscription authentication and inference have not yet been tested for this prototype.** Protocol support is based on the direct integrations in Pi 1.5.0; it is not a promise that an account will authorize Habibi.
+**These are experimental direct adapters, not verified provider-approved integrations. Live subscription authentication and inference have not yet been tested for this prototype.** Protocol support is based on direct integrations in Pi; it is not a promise that an account will authorize Habibi.
 
 - No Codex or Claude Code agent is invoked. Habibi constructs model requests, executes tools, and owns conversation state.
 - The OAuth adapters use public client identifiers used by existing coding clients, not separately registered Habibi OAuth applications.
@@ -196,9 +281,10 @@ On Unix, newly created credential/session files use mode `0600`, and newly creat
 Default storage:
 
 - Credentials: `$XDG_CONFIG_HOME/habibi/auth/`, or `~/.config/habibi/auth/`.
+- User defaults: `$XDG_CONFIG_HOME/habibi/settings.json`, or `~/.config/habibi/settings.json`.
 - Sessions: `$XDG_DATA_HOME/habibi/sessions/`, or `~/.local/share/habibi/sessions/`.
 
-`--help` and `--version` do not touch configuration. The idle TUI does not load credentials or contact a provider. Its optional background release check only contacts GitHub (see Update notices above).
+`--help` and `--version` do not touch configuration. The idle TUI does not load credentials or contact a provider unless you explicitly request Ollama discovery with `/models` or `/model`. Its optional background release check only contacts GitHub (see Update notices above).
 
 ## Embed `libhabibi`
 

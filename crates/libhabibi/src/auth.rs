@@ -67,12 +67,14 @@ fn client_id(provider: Provider) -> &'static str {
     match provider {
         Provider::Codex => CODEX_CLIENT,
         Provider::Claude => CLAUDE_CLIENT,
+        Provider::Ollama => unreachable!("Ollama does not use OAuth"),
     }
 }
 fn token_url(provider: Provider) -> &'static str {
     match provider {
         Provider::Codex => "https://auth.openai.com/oauth/token",
         Provider::Claude => "https://platform.claude.com/v1/oauth/token",
+        Provider::Ollama => unreachable!("Ollama does not use OAuth"),
     }
 }
 
@@ -108,6 +110,10 @@ impl AuthStore {
     }
 
     pub async fn logout(&self, provider: Provider) -> Result<()> {
+        ensure!(
+            provider != Provider::Ollama,
+            "Ollama does not require login or logout"
+        );
         let _lock = self.lock(provider).await?;
         match fs::remove_file(self.path(provider)) {
             Ok(()) => Ok(()),
@@ -117,6 +123,10 @@ impl AuthStore {
     }
 
     pub(crate) async fn credentials(&self, provider: Provider) -> Result<Credentials> {
+        ensure!(
+            provider != Provider::Ollama,
+            "Ollama does not use OAuth credentials"
+        );
         // Serialize refresh-token rotation across Habibi processes.
         let _lock = self.lock(provider).await?;
         let path = self.path(provider);
@@ -190,9 +200,14 @@ impl AuthStore {
 impl Login {
     /// Bind loopback before giving the caller an authorization URL.
     pub async fn begin(provider: Provider) -> Result<Self> {
+        ensure!(
+            provider != Provider::Ollama,
+            "Ollama does not require login; start `ollama serve`"
+        );
         let port = match provider {
             Provider::Codex => 1455,
             Provider::Claude => 53692,
+            Provider::Ollama => unreachable!("checked above"),
         };
         let listener = match TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).await {
             Ok(listener) => listener,
@@ -204,6 +219,7 @@ impl Login {
         let path = match provider {
             Provider::Codex => "/auth/callback",
             Provider::Claude => "/callback",
+            Provider::Ollama => unreachable!("checked above"),
         };
         let redirect = format!("http://localhost:{}{path}", listener.local_addr()?.port());
         let verifier = random();
@@ -212,8 +228,10 @@ impl Login {
         let authorize = match provider {
             Provider::Codex => "https://auth.openai.com/oauth/authorize",
             Provider::Claude => "https://claude.ai/oauth/authorize",
+            Provider::Ollama => unreachable!("checked above"),
         };
         let scope = match provider {
+            Provider::Ollama => unreachable!("checked above"),
             Provider::Codex => "openid profile email offline_access",
             Provider::Claude => {
                 "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"
@@ -230,6 +248,7 @@ impl Login {
             ("state", &state),
         ]);
         match provider {
+            Provider::Ollama => unreachable!("checked above"),
             Provider::Codex => {
                 url.query_pairs_mut().extend_pairs([
                     ("id_token_add_organizations", "true"),
@@ -426,6 +445,7 @@ async fn token_request(provider: Provider, payload: Value) -> Result<Value> {
                 .collect::<Vec<_>>(),
         ),
         Provider::Claude => request.json(&payload),
+        Provider::Ollama => bail!("Ollama does not use OAuth"),
     };
     let response = request.send().await.context("OAuth request failed")?;
     ensure!(

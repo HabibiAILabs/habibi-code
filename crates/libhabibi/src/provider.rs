@@ -17,6 +17,7 @@ use tokio::sync::mpsc;
 pub enum Provider {
     Codex,
     Claude,
+    Ollama,
 }
 
 impl Provider {
@@ -24,12 +25,38 @@ impl Provider {
         match self {
             Self::Codex => "codex",
             Self::Claude => "claude",
+            Self::Ollama => "ollama",
+        }
+    }
+    /// Bundled subscription choices, checked against Pi and provider docs on 2026-11-11.
+    /// Availability depends on the account. Arbitrary IDs remain supported.
+    /// Ollama choices must be discovered from the configured local server.
+    pub fn models(self) -> &'static [&'static str] {
+        match self {
+            Self::Codex => &[
+                "gpt-6.1-sol",
+                "gpt-6.1-terra",
+                "gpt-6-astra",
+                "gpt-6-sol",
+                "gpt-6-luna",
+                "gpt-5.6-luna",
+                "gpt-5.6-sol",
+                "gpt-5.6-terra",
+            ],
+            Self::Claude => &[
+                "claude-sonnet-5-5",
+                "claude-opus-5-5",
+                "claude-haiku-5-5",
+                "claude-fable-5-2",
+            ],
+            Self::Ollama => &[],
         }
     }
     pub fn default_model(self) -> &'static str {
         match self {
-            Self::Codex => "gpt-5.3-codex",
-            Self::Claude => "claude-sonnet-4-6",
+            Self::Codex => "gpt-6.1-sol",
+            Self::Claude => "claude-sonnet-5-5",
+            Self::Ollama => "qwen3:8b",
         }
     }
 }
@@ -44,7 +71,8 @@ impl FromStr for Provider {
         match s {
             "codex" => Ok(Self::Codex),
             "claude" => Ok(Self::Claude),
-            _ => bail!("Expected provider `codex` or `claude`"),
+            "ollama" => Ok(Self::Ollama),
+            _ => bail!("Expected provider `codex`, `claude`, or `ollama`"),
         }
     }
 }
@@ -53,6 +81,7 @@ pub(crate) struct Backend {
     provider: Provider,
     client: reqwest::Client,
     auth: AuthStore,
+    ollama: Option<crate::ollama::Client>,
     #[cfg(test)]
     pub(crate) endpoint: Option<String>,
 }
@@ -64,11 +93,16 @@ pub(crate) struct Completion {
 }
 
 impl Backend {
-    pub fn new(provider: Provider, auth: AuthStore) -> Result<Self> {
+    pub fn new(provider: Provider, auth: AuthStore, ollama_url: &str) -> Result<Self> {
         Ok(Self {
             provider,
             client: auth::http_client()?,
             auth,
+            ollama: if provider == Provider::Ollama {
+                Some(crate::ollama::Client::new(ollama_url)?)
+            } else {
+                None
+            },
             #[cfg(test)]
             endpoint: None,
         })
@@ -121,6 +155,19 @@ impl Backend {
         events: &mpsc::Sender<Event>,
         summary: bool,
     ) -> Result<Completion> {
+        if let Some(ollama) = &self.ollama {
+            #[cfg(test)]
+            let overridden = self
+                .endpoint
+                .as_deref()
+                .map(crate::ollama::Client::new)
+                .transpose()?;
+            #[cfg(test)]
+            let ollama = overridden.as_ref().unwrap_or(ollama);
+            return ollama
+                .complete(model, system, history, events, summary)
+                .await;
+        }
         let credentials = self.auth.credentials(self.provider).await?;
         let mut body = request_body(self.provider, model, system, session_id, history);
         if summary {
@@ -130,6 +177,7 @@ impl Backend {
         let endpoint = match self.provider {
             Provider::Codex => "https://chatgpt.com/backend-api/codex/responses",
             Provider::Claude => "https://api.anthropic.com/v1/messages",
+            Provider::Ollama => unreachable!("Ollama uses the native adapter"),
         };
         #[cfg(test)]
         let endpoint = self.endpoint.as_deref().unwrap_or(endpoint);
@@ -156,6 +204,7 @@ impl Backend {
                 .header("anthropic-beta", "claude-code-20250219,oauth-2025-04-20")
                 .header("user-agent", "claude-cli/2.1.2")
                 .header("x-app", "cli"),
+            Provider::Ollama => unreachable!("Ollama uses the native adapter"),
         };
         let response = request
             .bearer_auth(&credentials.access_token)
@@ -184,6 +233,7 @@ fn request_body(
 ) -> Value {
     let definitions = tools::definitions();
     match provider {
+        Provider::Ollama => unreachable!("Ollama uses the native adapter"),
         Provider::Codex => {
             let mut input = Vec::new();
             for message in history {
@@ -268,6 +318,7 @@ impl StreamState {
             );
         }
         match provider {
+            Provider::Ollama => bail!("Ollama does not use SSE"),
             Provider::Codex => match kind {
                 "response.output_text.delta" => {
                     self.streamed_text = true;
@@ -402,6 +453,7 @@ impl StreamState {
                             )?,
                         ),
                         Provider::Claude => (item["id"].as_str(), item["input"].clone()),
+                        Provider::Ollama => unreachable!("Ollama uses the native adapter"),
                     };
                     let id = id
                         .filter(|s| !s.is_empty())
@@ -470,6 +522,17 @@ async fn consume_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn bundled_subscription_defaults_are_listed_and_ollama_parses() {
+        for provider in [Provider::Codex, Provider::Claude] {
+            assert!(provider.models().contains(&provider.default_model()));
+        }
+        assert_eq!("ollama".parse::<Provider>().unwrap(), Provider::Ollama);
+        // Pi explicitly excludes these from its ChatGPT OAuth catalog.
+        assert!(!Provider::Codex.models().contains(&"gpt-5.5"));
+        assert!(!Provider::Codex.models().contains(&"gpt-5.3-codex-spark"));
+    }
+
     #[test]
     fn codex_preserves_reasoning_and_tool_ids() {
         let mut state = StreamState::default();

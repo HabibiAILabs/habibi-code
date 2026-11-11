@@ -1,5 +1,6 @@
 //! Native agent engine. No terminal, process-global configuration, or implicit network access.
 pub mod auth;
+pub mod ollama;
 mod provider;
 mod session;
 mod skills;

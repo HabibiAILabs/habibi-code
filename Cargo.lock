@@ -378,15 +378,18 @@ dependencies = [
 
 [[package]]
 name = "habibi"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "crossterm",
  "futures-util",
  "libhabibi",
  "ratatui",
  "reqwest",
+ "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tokio-util",
  "unicode-width 0.2.0",
@@ -695,7 +698,7 @@ checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
 
 [[package]]
 name = "libhabibi"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",

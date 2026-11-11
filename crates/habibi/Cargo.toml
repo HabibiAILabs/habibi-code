@@ -8,6 +8,8 @@ rust-version.workspace = true
 anyhow.workspace = true
 libhabibi = { path = "../libhabibi" }
 serde_json.workspace = true
+serde.workspace = true
+base64 = "0.22"
 tokio = { workspace = true, features = ["fs"] }
 tokio-util.workspace = true
 crossterm = { version = "0.28", features = ["event-stream"] }
@@ -15,3 +17,6 @@ futures-util = "0.3"
 unicode-width = "0.2"
 ratatui = { version = "0.29", default-features = false, features = ["crossterm", "unstable-rendered-line-info"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+
+[dev-dependencies]
+tempfile = "3"
