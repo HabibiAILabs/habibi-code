@@ -1,39 +1,35 @@
-# Habibi v0.3.0
+# Habibi v0.3.1
 
-Local Ollama, refreshed subscription choices, persistent defaults, and terminal status integration.
+Slash commands without interrupting the agent, plus command suggestions and Tab completion.
 
 ## What's new
 
-- **Ollama provider:** native streaming chat and tool calls with the usual approval, steering, compaction, cancellation, and session-resume behavior. No OAuth, no automatic model downloads, and no subscription credentials sent to Ollama. Start with `habibi --provider ollama --model qwen3:8b` after installing the model yourself.
-- **Model discovery and selection:** `habibi models` lists bundled subscription choices; `habibi models ollama` lists installed Ollama models. `/models` does the same for the active provider, and Ctrl-N/P in `/model` cycles choices. Custom IDs remain supported.
-- **Subscription model refresh:** new-install defaults are `gpt-6.1-sol` for Codex and `claude-sonnet-5-5` for Claude. Bundled alternatives include the current GPT-6.1/GPT-6/GPT-5.6 ChatGPT OAuth choices and Claude Opus/Sonnet/Haiku 5.5 plus Fable 5.2. The snapshot was checked on 2026-11-11; account access varies. Existing saved model IDs are preserved. No hosted catalog or automatic catalog refresh.
-- **Persistent user defaults:** applying `/model` saves a model per provider and the preferred provider. Applying `/settings` also saves frontend preferences, including explicitly enabled YOLO, for new sessions in every directory. Stored privately at `$XDG_CONFIG_HOME/habibi/settings.json` or `~/.config/habibi/settings.json`. CLI overrides do not rewrite defaults; resumed sessions keep their journaled settings.
-- **Program Status Protocol:** OSC 7501 reports idle, working, permission/authentication blocked, done, error, and cancellation states for Rex and other supporting terminals. Messages are fixed and contain no prompts, arguments, paths, credentials, or provider error details. Duplicate states are suppressed. Set `HABIBI_NO_PROGRAM_STATUS=1` to disable.
+- **Commands during execution:** `/inspect`, `/settings`, `/model`, `/models`, `/help`, and `/update` remain available while the agent runs. Commands are handled locally, not sent as steering messages.
+- **Slash-command suggestions:** type `/` to see matching commands. Press **Tab** to complete the first match and keep pressing to cycle through matches. Suggestions narrow as you type.
+- **Inspection during execution:** browse the latest read-only context-boundary snapshot while the agent continues working. Close and reopen the inspector to refresh. Inspection never executes or approves tools.
+- **Deferred settings:** model and settings changes saved during execution apply after the current run finishes, before queued follow-ups. In-flight requests and current tool permissions remain unchanged, including Ask/YOLO policy. User defaults are saved when the changes are applied.
+- **Documentation and website:** refreshed command guidance and GitHub Pages release information.
 
 ## Compatibility and safety
 
-Old journals remain readable. Ollama journals require **v0.3.0 or later**. New sessions use user defaults; resumed sessions retain their own model, endpoint, and permission policy. Context/turn/skill settings remain session-local. Applying `/model` alone never promotes an old session's permission mode to global defaults.
+Existing journals and user defaults remain compatible. `/compact`, `/quit`, and `/exit` still require an idle agent; Esc interrupts a run. Closing an inspector or settings dialog does not cancel the run. The inspector is a snapshot, not a continuously updating view.
 
-**Enabling YOLO in `/settings` now also enables it for future new sessions in every directory.** The confirmation explicitly warns about this scope. Disable it and Apply to restore Ask for future sessions. Existing journals keep their saved permission mode and must be changed separately. YOLO auto-approves all tools, including unsandboxed shell commands.
-
-Remote Ollama endpoints receive conversation and workspace content. Use only trusted servers and HTTPS outside trusted local networks. Authenticated Ollama servers are not supported.
+Subscription adapters remain experimental and are not provider-approved integrations. Tool approval is not sandboxing: shell commands retain your account's filesystem and network access. Explicitly enabling YOLO also saves that preference for future new sessions in every directory. macOS binaries remain unsigned and not notarized.
 
 ## Validation
 
-Offline tests cover all three providers' tool loops, approval/denial, steering, compaction, native history, and resume; Ollama framing is tested across arbitrary UTF-8 chunk boundaries. A live local `qwen3:8b` read-tool round trip passed. OSC 7501 wire format, state mapping, deduplication, opt-out behavior, and private-data exclusion have unit coverage. An end-to-end pseudo-terminal test verified idle → working → blocked for tool approval → working → done → idle against an Ollama fixture server.
+Workspace tests cover slash-command matching and read-only inspection snapshots, alongside the existing provider, approval, steering, compaction, resume, settings, and terminal-status tests. The live Ollama test requires an external server and is skipped by default. Release publication is gated on the four-platform build/test workflow. Live subscription authentication and inference are not verified by these checks.
 
-Live subscription authentication/inference and Rex's UI presentation have not been verified. Catalog references establish documented model IDs, not provider approval or guaranteed subscription access. See [provider notes](docs/providers.md).
-
-## Install
+## Install or upgrade
 
 ```sh
 curl -fsSL https://habibiailabs.github.io/habibi-code/install.sh | sh
 ```
 
-The default destination is `~/.local/bin`. Add it to PATH if prompted. After this release is published, pin it with `HABIBI_VERSION=v0.3.0` on the `sh` side of the pipe.
+The default destination is `~/.local/bin`. Restart Habibi after upgrading. To pin this release:
 
-## Important limitations
+```sh
+curl -fsSL https://habibiailabs.github.io/habibi-code/install.sh | HABIBI_VERSION=v0.3.1 sh
+```
 
-Subscription adapters remain experimental and are not provider-approved integrations. Claude compatibility uses Claude Code-specific identity. There is no API-billing fallback. Review provider terms.
-
-Tool approval is **not sandboxing**. Shell commands have your account's filesystem/network access. Sessions, user defaults, and credentials are plaintext files. macOS binaries are unsigned and not notarized. Updates are opt-in to install, never automatic. Checksums detect corruption; they are not independent signatures.
+Review the installer before running remote shell code. Checksums detect corruption; they are not independent publisher signatures.

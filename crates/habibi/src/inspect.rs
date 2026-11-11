@@ -1,6 +1,6 @@
 //! Read-only, session-local context and tool-call inspector.
 use crossterm::event::{KeyCode, KeyEvent};
-use libhabibi::{Message, Session};
+use libhabibi::Message;
 use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Style},
@@ -25,10 +25,7 @@ pub(crate) struct Inspector {
     searching: bool,
 }
 impl Inspector {
-    pub(crate) fn new(session: &Session) -> Self {
-        Self::from_snapshot(session.inspect_context(), session.tool_history())
-    }
-    fn from_snapshot(definitions: Vec<(String, String)>, history: &[Message]) -> Self {
+    pub(crate) fn from_snapshot(definitions: Vec<(String, String)>, history: &[Message]) -> Self {
         let boundary = history
             .iter()
             .rposition(|m| matches!(m, Message::User { .. }))

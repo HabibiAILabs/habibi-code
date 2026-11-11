@@ -2,9 +2,15 @@
 
 A small, native Rust coding-agent prototype: **`libhabibi` owns the agent loop; `habibi` is its full-screen terminal frontend.** No JavaScript runtime, Habibi daemon, or provider-agent subprocess (Ollama runs as a separate server). A best-effort background GitHub release check is the only idle network activity; it never contacts model providers.
 
-## What's new in v0.3.0
+## What's new in v0.3.1
 
 [Release notes](RELEASE_NOTES.md) · [Quick-start website](https://habibiailabs.github.io/habibi-code/)
+
+- **Commands during execution:** `/inspect`, `/settings`, `/model`, `/models`, `/help`, and `/update` work without interrupting the agent. Inspection shows the latest context-boundary snapshot; close and reopen to refresh.
+- **Slash-command suggestions:** type `/` to see matches; press Tab to complete and cycle them.
+- **Safe settings changes:** changes saved during execution apply after the current run, before queued follow-ups. Active tool permissions stay unchanged. `/compact`, `/quit`, and `/exit` require idle.
+
+### Also included from v0.3.0
 
 - **Ollama:** native local chat streaming and tool calls, no OAuth or automatic model downloads.
 - **Current subscription model choices:** bundled Codex/Claude lists, `/models` to browse,
@@ -198,9 +204,10 @@ Library hosts can set `SessionConfig.skill_dirs` and `sticky_skills`; set
 - **Esc:** interrupt the active run, including a pending approval, and clear queued messages. In settings it closes the dialog without saving. Already-completed tool effects are not undone. Errors also clear pending queues rather than automatically continuing.
 - **Ctrl-C:** cancel an active run; quit when idle.
 - **PgUp / PgDn or mouse wheel:** scroll the transcript or open argument inspector. Scrolling up keeps your reading position stable as output arrives; scroll back to the bottom to follow output again. Conversation roles, headings, bold text, inline code, and fenced code blocks have lightweight styling. Tools/results use compact summaries, with full content retained in the session journal. Thinking is shown as a compact activity indicator, never raw private reasoning.
+- **Tab:** complete slash commands; press again to cycle matches. Suggestions appear as you type `/`.
 - **Ctrl-U:** clear input. **/help**, **/quit**, **/models**, **/model**, **/settings**, **/compact**, **/inspect**.
 - **Activity animation:** while running, the prompt border shows a bouncing ball with **Thinking**, **Responding**, **Executing tool call: <name>**, or **Compacting context**. It pauses for approvals and stops when idle. The footer keeps safety/cancellation hints without repeating the activity label.
-- **/inspect:** open a read-only context and tool-call inspector while idle (see below).
+- **/inspect:** open a read-only context and tool-call inspector, including during execution (see below).
 - **/models:** list bundled subscription choices or discover installed Ollama models.
 - **/model:** choose with Ctrl-N/P or type a model ID in a modal; Ctrl-D restores the bundled provider default. Enter saves a default for future new sessions. Custom IDs are supported; availability depends on your account/server.
 - **/settings:** edit model, maximum model turns per prompt (**0 = unlimited**, the default), context budget in bytes, auto-compaction percentage (default **80%**, **0** disables it), sticky skills, and the skill directory list. Tab/Up/Down selects a field, Ctrl-U clears it, Enter validates and applies, and Esc discards the draft. Model and frontend preferences also become user defaults; other settings remain session-local. `--resume` restores journaled settings; provider and workspace remain fixed. Changes are available only while idle.
@@ -224,9 +231,11 @@ is sent. Unsupported terminals should ignore the OSC. Reports are disabled when
 stdout is not a terminal; set `HABIBI_NO_PROGRAM_STATUS=1` to disable them explicitly.
 The library never emits terminal status sequences.
 
+Slash commands remain available during execution. `/settings` and `/model` changes are queued until the current run finishes, before queued follow-ups; current tool permissions stay unchanged. `/compact`, `/quit`, and `/exit` require an idle agent.
+
 ### Context and tool-call inspector
 
-Run **`/inspect`** while idle to open a two-tab modal:
+Run **`/inspect`** at any time to open a two-tab modal. During execution it shows the latest context-boundary snapshot; the agent keeps running. Close and reopen to refresh:
 
 - **Context:** budget usage with a proportional breakdown, system prompt, skills catalog
   and sticky snapshots, tool definitions, and each active conversation message.

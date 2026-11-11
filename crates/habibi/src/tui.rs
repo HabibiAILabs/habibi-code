@@ -64,6 +64,7 @@ impl Drop for Screen {
 }
 
 /// A draft: changes reach the session and user defaults only after explicit Apply.
+#[derive(Clone)]
 struct SettingsDialog {
     fields: Vec<String>,
     selected: usize,
@@ -77,8 +78,7 @@ struct SettingsDialog {
     sticky_skills: bool,
 }
 impl SettingsDialog {
-    fn new(session: &Session, model_only: bool) -> Self {
-        let c = session.config();
+    fn from_config(c: &libhabibi::SessionConfig, model_only: bool) -> Self {
         Self {
             fields: vec![
                 c.model.clone(),
@@ -102,7 +102,7 @@ impl SettingsDialog {
         if self.model_only { 1 } else { 12 }
     }
     fn values(&self) -> Result<(String, usize, usize, u8)> {
-        Ok((
+        let values = (
             self.fields[0].clone(),
             self.fields[1]
                 .parse()
@@ -113,7 +113,16 @@ impl SettingsDialog {
             self.fields[3]
                 .parse()
                 .context("Auto-compaction must be 0–100 (0 disables it)")?,
-        ))
+        );
+        anyhow::ensure!(
+            !values.0.trim().is_empty()
+                && values.0.len() <= 256
+                && !values.0.chars().any(char::is_control),
+            "Model must be 1–256 characters without control characters"
+        );
+        anyhow::ensure!(values.2 > 0, "Context budget must be positive");
+        anyhow::ensure!(values.3 <= 100, "Auto-compaction must be 0–100");
+        Ok(values)
     }
     fn key(&mut self, key: KeyEvent) {
         self.error.clear();
@@ -439,6 +448,7 @@ struct View {
     title: String,
     dialog: Option<SettingsDialog>,
     inspector: Option<crate::inspect::Inspector>,
+    inspection: (Vec<(String, String)>, Vec<Message>),
     preferences: Preferences,
     model: String,
     context_used: usize,
@@ -555,6 +565,12 @@ impl View {
     }
     fn event(&mut self, event: Event) {
         match event {
+            Event::Inspection {
+                definitions,
+                history,
+            } => {
+                self.inspection = (definitions, history);
+            }
             Event::RunStarted => {
                 self.status = "Thinking · Esc/Ctrl-C cancel".into();
                 self.busy = true;
@@ -719,7 +735,7 @@ impl View {
                 sections[1],
             );
             frame.render_widget(
-                Paragraph::new(self.status_bar())
+                Paragraph::new({ let matches = slash_matches(&self.input); if matches.is_empty() { self.status_bar() } else { format!("{} · Tab complete: {}", self.status_bar(), matches.join("  ")) } })
                     .wrap(Wrap { trim: false })
                     .style(Style::default().fg(if self.yolo_active {
                         Color::Yellow
@@ -774,6 +790,7 @@ pub async fn run(session: Session, path: PathBuf) -> Result<()> {
         status: "Enter submit · PgUp/PgDn scroll · Ctrl-C quit · /help".into(),
         dialog: None,
         inspector: None,
+        inspection: Default::default(),
         preferences: session.config().preferences.clone(),
         model: format!("{} / {}", session.config().provider, session.config().model),
         context_used: session.context_bytes(),
@@ -829,6 +846,10 @@ pub async fn run(session: Session, path: PathBuf) -> Result<()> {
     if session.config().preferences.yolo {
         view.message("Saved YOLO mode restored: ALL tools auto-approved. Shell commands are not sandboxed. Disable in /settings.");
     }
+    view.inspection = (session.inspect_context(), session.tool_history().to_vec());
+    let mut current_config = session.config().clone();
+    let mut deferred_settings: Option<SettingsDialog> = None;
+    let mut completion: Option<(String, usize)> = None;
     let mut session = Some(session);
     let mut job: Option<Job> = None;
     let mut cancellation: Option<CancellationToken> = None;
@@ -867,6 +888,11 @@ pub async fn run(session: Session, path: PathBuf) -> Result<()> {
                         let (returned,result,mut unconsumed)=job.take().unwrap().await.context("Agent task panicked")?;
                         view.context_used = returned.context_bytes();
                         session=Some(returned);cancellation=None;steering_sender=None;view.pending=None;view.details=None;view.busy=false;
+                        if let Some(dialog) = deferred_settings.take() {
+                            if let Err(error) = apply_settings(&mut view, session.as_mut().unwrap(), &dialog) { view.message(&format!("Queued settings failed: {error:#}")); }
+                        }
+                        current_config = session.as_ref().unwrap().config().clone();
+                        view.inspection = (session.as_ref().unwrap().inspect_context(), session.as_ref().unwrap().tool_history().to_vec());
                         if let Err(error)=&result {view.message(&format!("Stopped: {error:#}"));}
                         program_status.report(if interrupted { crate::program_status::Status::Idle } else if result.is_err() { crate::program_status::Status::Error } else { crate::program_status::Status::Done });
                         if let Some(prompt) = view.next_queued(&mut unconsumed, interrupted || result.is_err()) {
@@ -918,6 +944,7 @@ pub async fn run(session: Session, path: PathBuf) -> Result<()> {
                             dirty=true;
                         }
                         TerminalEvent::Paste(text)=>{
+                            completion = None;
                             program_status.acknowledge();
                             if view.inspector.is_some() { continue; }
                             if let Some(dialog) = &mut view.dialog {
@@ -949,41 +976,36 @@ pub async fn run(session: Session, path: PathBuf) -> Result<()> {
                                             dialog.confirm_yolo = true;
                                             continue;
                                         }
-                                        let preferences = dialog.preferences.clone();
-                                        let model_only = dialog.model_only;
-                                        let result = dialog.values().and_then(|(model, turns, bytes, percent)| {
-                                            let dirs: Vec<std::path::PathBuf> = serde_json::from_str(&dialog.fields[4]).context("Skill directories must be a JSON array of paths")?;
-                                            session.as_mut().context("Settings unavailable during a run")?.update_settings_with_skills(model, turns, bytes, preferences, percent, dialog.sticky_skills, dirs)
-                                        });
-                                        match result {
-                                            Ok(()) => {
-                                                let config = session.as_ref().unwrap().config();
-                                                view.title = visible(&format!(" habibi · {} · {} ", config.provider, config.model));
-                                                view.preferences = config.preferences.clone();
-                                                view.yolo_active = config.preferences.yolo;
-                                                view.context_limit = config.max_context_bytes;
-                                                view.context_used = session.as_ref().unwrap().context_bytes();
-                                                view.model = format!("{} / {}", config.provider, config.model);
-                                                let saved_defaults = (|| -> Result<()> {
-                                                    let path = crate::defaults::path()?;
-                                                    let mut defaults = crate::defaults::Defaults::load(&path)?;
-                                                    defaults.remember(config, model_only);
-                                                    defaults.save(&path)
-                                                })();
-                                                view.dialog = None;
-                                                match saved_defaults {
-                                                    Ok(()) => view.message("Session settings and user defaults saved. Defaults apply to new sessions in every directory."),
-                                                    Err(error) => view.message(&format!("Session settings saved, but user defaults were NOT saved: {error:#}")),
-                                                }
+                                        if job.is_some() {
+                                            if let Err(error) = dialog.values().and_then(|_| serde_json::from_str::<Vec<PathBuf>>(&dialog.fields[4]).map_err(Into::into)) {
+                                                dialog.error = format!("{error:#}");
+                                            } else {
+                                                deferred_settings = view.dialog.take();
+                                                view.message("Settings queued; they apply after this run, before the next follow-up. Current tool permissions are unchanged.");
                                             }
-                                            Err(error) => view.dialog.as_mut().unwrap().error = format!("{error:#}"),
+                                        } else {
+                                            let dialog = view.dialog.take().unwrap();
+                                            match apply_settings(&mut view, session.as_mut().context("Session unavailable")?, &dialog) {
+                                                Ok(()) => current_config = session.as_ref().unwrap().config().clone(),
+                                                Err(error) => { let mut dialog = dialog; dialog.error = format!("{error:#}"); view.dialog = Some(dialog); }
+                                            }
                                         }
                                     }
                                     _ => view.dialog.as_mut().unwrap().key(key),
                                 }
                                 continue;
                             }
+                            if key.code != KeyCode::Tab { completion = None; }
                             match key.code {
+                                KeyCode::Tab => {
+                                    let (prefix, index) = completion.take().unwrap_or_else(|| (view.input.clone(), 0));
+                                    let matches = slash_matches(&prefix);
+                                    if let Some(command) = matches.get(index % matches.len().max(1)) {
+                                        view.input = (*command).into();
+                                        view.input_cursor = view.input.len();
+                                        completion = Some((prefix, index + 1));
+                                    }
+                                }
                                 KeyCode::F(2) if view.pending.is_some()=>{
                                     if view.details.take().is_none() {
                                         let call = &view.pending.as_ref().unwrap().0;
@@ -1015,20 +1037,20 @@ pub async fn run(session: Session, path: PathBuf) -> Result<()> {
                                 KeyCode::Enter if key.modifiers.contains(KeyModifiers::CONTROL)=>view.insert("\n"),
                                 KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL)=>view.insert("\n"),
                                 KeyCode::Char(c) if !c.is_control() && !key.modifiers.intersects(KeyModifiers::CONTROL|KeyModifiers::ALT)=>view.insert(&c.to_string()),
-                                KeyCode::Enter if job.is_some()=>{
+                                KeyCode::Enter if job.is_some() && !view.input.trim().starts_with('/')=>{
                                     if !view.input.trim().is_empty() {
-                                        if view.input.trim().starts_with('/') { view.message("Commands are available while idle; Esc interrupts the run."); continue; }
                                         if interrupted { view.message("Wait for cancellation to finish before submitting."); continue; }
                                         if !view.enqueue(key.modifiers.contains(KeyModifiers::ALT), steering_sender.as_ref()) {
                                             view.message("Queue full or run ending; draft kept. Try again shortly.");
                                         }
                                     }
                                 }
-                                KeyCode::Enter if job.is_none()=>{
+                                KeyCode::Enter=>{
                                     let prompt=std::mem::take(&mut view.input);view.input_cursor=0;
                                     match prompt.trim() {
                                         ""=>{},
-                                        "/quit"|"/exit"=>break,
+                                        "/quit"|"/exit" if job.is_none()=>break,
+                                       "/quit"|"/exit"|"/compact" if job.is_some() => view.message("This command requires an idle agent. Esc interrupts the run."),
                                         "/update" => view.message("Install/upgrade (review the script before running):\ncurl -fsSL https://habibiailabs.github.io/habibi-code/install.sh | sh\nReleases: https://github.com/habibiailabs/habibi-code/releases"),
                                         "/compact" => {
                                             let running = session.take().context("Session unavailable")?;
@@ -1036,25 +1058,27 @@ pub async fn run(session: Session, path: PathBuf) -> Result<()> {
                                             job = Some(next_job); cancellation = Some(cancel); steering_sender = Some(sender); interrupted = false;
                                         }
                                         "/inspect" => {
-                                            view.inspector = Some(crate::inspect::Inspector::new(session.as_ref().context("Session unavailable")?));
+                                            view.inspector = Some(crate::inspect::Inspector::from_snapshot(view.inspection.0.clone(), &view.inspection.1));
+                                           if job.is_some() { view.message("Inspector: latest context-boundary snapshot; the agent continues running. Close and reopen to refresh."); }
                                         }
                                         "/models" | "/model" | "/settings" => {
-                                            let current = session.as_ref().context("Session unavailable")?;
-                                            let provider = current.config().provider;
+                                            let provider = current_config.provider;
                                             if prompt.trim() != "/models" {
-                                                let mut dialog = SettingsDialog::new(current, prompt.trim() == "/model");
+                                                let mut dialog = deferred_settings.clone().unwrap_or_else(|| SettingsDialog::from_config(&current_config, prompt.trim() == "/model"));
+                                                dialog.model_only = prompt.trim() == "/model";
+                                                dialog.selected = 0;
                                                 if provider == libhabibi::Provider::Ollama { dialog.model_choices = installed_models.clone(); }
                                                 view.dialog = Some(dialog);
                                             }
                                             if provider == libhabibi::Provider::Ollama && prompt.trim() != "/settings" && model_check.is_none() {
-                                                let url = current.config().ollama_url.clone();
+                                                let url = current_config.ollama_url.clone();
                                                 model_check = Some(tokio::spawn(async move { libhabibi::ollama::Client::new(&url)?.models().await }));
                                                 view.message("Discovering installed Ollama models…");
                                             } else if prompt.trim() == "/models" && provider != libhabibi::Provider::Ollama {
                                                 view.message(&format!("Bundled {provider} subscription models (account availability varies):\n{}\n/model: Ctrl-N/P selects a model, or type any model ID; Enter saves it.", provider.models().join("\n")));
                                             }
                                         }
-                                        "/help"=>view.message("/inspect: context and tool-call inspector · /compact: summarize context · /models: list models · /model: choose or edit model ID · /settings: model, limits, status bar, tool permissions · /update: upgrade instructions · /quit: exit\nEnter: submit/steer · Alt-Enter: follow-up · Ctrl-Enter/Ctrl-J: newline\nPgUp/PgDn or mouse wheel: scroll · Ctrl-U: clear input · F2: inspect approval\nDuring execution, Esc/Ctrl-C cancels; completed edits are not undone.\nAsk mode: Ctrl-Y allows once, Ctrl-N denies (or y/n in F2 inspector). YOLO auto-approves all tools. Neither mode is a sandbox.\nLogin: subscriptions use habibi login codex|claude outside the TUI. Ollama needs no login.\nResume: habibi --resume <session path shown above>."),
+                                        "/help"=>view.message("/inspect: context and tool-call inspector · /compact: summarize context · /models: list models · /model: choose or edit model ID · /settings: model, limits, status bar, tool permissions · /update: upgrade instructions · /quit: exit\nEnter: submit/steer · Alt-Enter: follow-up · Ctrl-Enter/Ctrl-J: newline\nTab: complete/cycle slash commands · PgUp/PgDn or mouse wheel: scroll · Ctrl-U: clear input · F2: inspect approval\nCommands work during execution; settings apply after the run. /compact and /quit require idle. Esc/Ctrl-C cancels; completed edits are not undone.\nAsk mode: Ctrl-Y allows once, Ctrl-N denies (or y/n in F2 inspector). YOLO auto-approves all tools. Neither mode is a sandbox.\nLogin: subscriptions use habibi login codex|claude outside the TUI. Ollama needs no login.\nResume: habibi --resume <session path shown above>."),
                                         command if command.starts_with('/') => view.message("Unknown command. Available: /inspect, /compact, /models, /model, /settings, /update, /help, /quit, /exit."),
                                         _=>{
                                             view.scroll=0;view.message(&format!("You\n{prompt}"));
@@ -1138,6 +1162,66 @@ fn truncate(text: &str, limit: usize) -> String {
         &text[..end]
     )
 }
+const SLASH_COMMANDS: &[&str] = &[
+    "/inspect",
+    "/settings",
+    "/models",
+    "/model",
+    "/compact",
+    "/help",
+    "/update",
+    "/quit",
+    "/exit",
+];
+
+fn slash_matches(input: &str) -> Vec<&'static str> {
+    if !input.starts_with('/') || input.chars().any(char::is_whitespace) {
+        return Vec::new();
+    }
+    SLASH_COMMANDS
+        .iter()
+        .copied()
+        .filter(|command| command.starts_with(input))
+        .collect()
+}
+
+fn apply_settings(view: &mut View, session: &mut Session, dialog: &SettingsDialog) -> Result<()> {
+    let (model, turns, bytes, percent) = dialog.values()?;
+    let dirs = serde_json::from_str(&dialog.fields[4])
+        .context("Skill directories must be a JSON array of paths")?;
+    session.update_settings_with_skills(
+        model,
+        turns,
+        bytes,
+        dialog.preferences.clone(),
+        percent,
+        dialog.sticky_skills,
+        dirs,
+    )?;
+    let config = session.config();
+    view.title = visible(&format!(
+        " habibi · {} · {} ",
+        config.provider, config.model
+    ));
+    view.preferences = config.preferences.clone();
+    view.yolo_active = config.preferences.yolo;
+    view.context_limit = config.max_context_bytes;
+    view.context_used = session.context_bytes();
+    view.model = format!("{} / {}", config.provider, config.model);
+    view.inspection = (session.inspect_context(), session.tool_history().to_vec());
+    let saved = (|| -> Result<()> {
+        let path = crate::defaults::path()?;
+        let mut defaults = crate::defaults::Defaults::load(&path)?;
+        defaults.remember(config, dialog.model_only);
+        defaults.save(&path)
+    })();
+    match saved {
+        Ok(()) => view.message("Session settings and user defaults saved. Defaults apply to new sessions in every directory."),
+        Err(error) => view.message(&format!("Session settings saved, but user defaults were NOT saved: {error:#}")),
+    }
+    Ok(())
+}
+
 fn start_job(
     mut session: Session,
     prompt: String,
@@ -1421,6 +1505,32 @@ mod tests {
         assert_eq!(dialog.selected, 0);
     }
 
+    #[test]
+    fn slash_suggestions_match_only_command_drafts() {
+        assert_eq!(slash_matches("/ins"), vec!["/inspect"]);
+        assert_eq!(slash_matches("/mod"), vec!["/models", "/model"]);
+        assert_eq!(slash_matches("/"), SLASH_COMMANDS);
+        for draft in ["", "hello", "/unknown", "/model name", "/inspect\n"] {
+            assert!(slash_matches(draft).is_empty(), "{draft:?}");
+        }
+    }
+
+    #[test]
+    fn inspection_snapshot_does_not_interrupt_or_approve() {
+        let mut view = test_view();
+        view.event(Event::RunStarted);
+        view.event(Event::Inspection {
+            definitions: vec![("System".into(), "snapshot".into())],
+            history: vec![],
+        });
+        assert!(view.busy);
+        assert!(view.pending.is_none());
+        assert_eq!(view.inspection.0[0].1, "snapshot");
+        let _inspector =
+            crate::inspect::Inspector::from_snapshot(view.inspection.0.clone(), &view.inspection.1);
+        assert!(view.busy);
+    }
+
     fn test_view() -> View {
         View {
             lines: VecDeque::new(),
@@ -1432,6 +1542,7 @@ mod tests {
             title: String::new(),
             dialog: None,
             inspector: None,
+            inspection: Default::default(),
             preferences: Preferences::default(),
             model: "codex / custom".into(),
             context_used: 512,

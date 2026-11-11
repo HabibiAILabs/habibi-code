@@ -46,6 +46,11 @@ pub enum Message {
 /// Dropping the reply denies the tool. No tool is automatically approved, including reads.
 pub enum Event {
     RunStarted,
+    /// Read-only snapshot refreshed at context boundaries.
+    Inspection {
+        definitions: Vec<(String, String)>,
+        history: Vec<Message>,
+    },
     SteeringApplied(String),
     CompactionStarted,
     Compacted {
@@ -606,6 +611,14 @@ impl Session {
     }
 
     async fn emit_context(&self, events: &mpsc::Sender<Event>) -> Result<()> {
+        emit(
+            events,
+            Event::Inspection {
+                definitions: self.inspect_context(),
+                history: self.tool_history().to_vec(),
+            },
+        )
+        .await?;
         emit(
             events,
             Event::ContextUsage {
