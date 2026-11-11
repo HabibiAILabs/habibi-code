@@ -4,6 +4,7 @@
 Usage: cargo build --release -p habibi && python scripts/smoke.py
 """
 import fcntl
+import json
 import os
 from pathlib import Path
 import pty
@@ -176,10 +177,13 @@ with tempfile.TemporaryDirectory(prefix="habibi-smoke-") as directory:
     sessions = list((root / "data/habibi/sessions").glob("*.jsonl"))
     assert len(sessions) == 5
     launch(["--resume", str(sessions[0])], env, root)
-    assert not (root / "config").exists(), "idle TUI accessed credentials"
+    assert not (root / "config/habibi/auth").exists(), "TUI accessed credentials"
+    defaults = json.loads((root / "config/habibi/settings.json").read_text())
+    assert defaults["models"]["codex"] == "smoke-custom-model", "model default was not saved"
+    assert defaults["preferences"]["yolo"] is False, "disabling YOLO did not persist"
     check_private_login(env, root)
     check_private_login(env, root, cancel=True)
-    assert not (root / "config").exists(), "failed/cancelled login wrote credentials"
+    assert not (root / "config/habibi/auth").exists(), "failed/cancelled login wrote credentials"
     print("PTY launch, inspect/model/settings modals, validation, YOLO confirmation, multiline input/paste, /help, terminal restoration, session persistence and resume: passed")
     print("Remote login paste: hidden input, state rejection, cancellation and terminal restoration passed")
     print(f"Binary: {binary.stat().st_size / 1024 / 1024:.2f} MiB")
