@@ -888,8 +888,9 @@ pub async fn run(session: Session, path: PathBuf) -> Result<()> {
                         let (returned,result,mut unconsumed)=job.take().unwrap().await.context("Agent task panicked")?;
                         view.context_used = returned.context_bytes();
                         session=Some(returned);cancellation=None;steering_sender=None;view.pending=None;view.details=None;view.busy=false;
-                        if let Some(dialog) = deferred_settings.take() {
-                            if let Err(error) = apply_settings(&mut view, session.as_mut().unwrap(), &dialog) { view.message(&format!("Queued settings failed: {error:#}")); }
+                        if let Some(dialog) = deferred_settings.take()
+                            && let Err(error) = apply_settings(&mut view, session.as_mut().unwrap(), &dialog) {
+                            view.message(&format!("Queued settings failed: {error:#}"));
                         }
                         current_config = session.as_ref().unwrap().config().clone();
                         view.inspection = (session.as_ref().unwrap().inspect_context(), session.as_ref().unwrap().tool_history().to_vec());
