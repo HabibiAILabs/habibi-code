@@ -2,9 +2,13 @@
 
 A small, native Rust coding-agent prototype: **`libhabibi` owns the agent loop; `habibi` is its full-screen terminal frontend.** No external JavaScript runtime, Habibi daemon, or provider-agent subprocess (Ollama runs as a separate server). Optional code mode embeds QuickJS; explicitly configured MCP servers may run as child processes. Without MCP connections, a best-effort background GitHub release check is the only idle network activity; it never contacts model providers.
 
-## What's new in v0.4.0
+## What's new in v0.4.1
 
 [Release notes](RELEASE_NOTES.md) · [Quick-start website](https://habibiailabs.github.io/habibi-code/)
+
+- **MCP OAuth:** select a saved HTTP server in `/mcp` and press **a** to authenticate in your browser, or use `habibi mcp login SERVER`. Private endpoint-bound credentials refresh automatically; **l** removes local OAuth credentials.
+
+### Included from v0.4.0
 
 - **Control any instance:** private Unix sockets let other processes steer the TUI, headless runs, and RPC instances without taking over their terminal.
 - **Headless and RPC:** `-p` streams a one-shot response; `--rpc` provides persistent JSON Lines control with individual tool approvals.
@@ -140,7 +144,14 @@ Open **`/mcp`** while idle to manage individual servers:
   cursor; **Ctrl-U** clears a field. Backspace, Delete, and paste are supported.
   The form scrolls to the focused field. Enter accepts the draft; Esc discards it.
 - **Space** enables/disables the selected server (`"disabled": true` persists it).
-- **d** removes the selected server from the draft.
+- **a** starts **Authenticate** for the selected saved HTTP server; leave the bearer
+  environment field blank for OAuth. Habibi opens your browser and displays a
+  fallback link. A remote-browser callback can be pasted into the dialog (input
+  hidden). **Esc / Ctrl-C** cancels without replacing existing credentials.
+- **l** removes the selected server's local OAuth credentials (not provider-side
+  revocation). The list distinguishes saved OAuth, bearer-env, and unauthenticated
+  configuration; a saved credential indicator is not a live validity check.
+- **d** removes the selected server from the draft (credentials are not deleted).
 - **s**, then **Enter** confirms saving the user config and trusting its enabled
   programs. Esc closes the manager without saving. Existing connections close;
   enabled servers reconnect on the next prompt.
@@ -178,7 +189,48 @@ receive a minimal environment (PATH, HOME, USER, TMPDIR, TEMP, SYSTEMROOT) plus
 these explicit mappings. Their working directory is the session workspace;
 stderr is discarded to avoid corrupting the TUI. Remote servers use Streamable
 HTTP, require HTTPS except on loopback, and do not follow redirects. Bearer auth
-is optional; OAuth login and legacy HTTP+SSE transport are not implemented.
+is optional and takes precedence over saved OAuth. Legacy HTTP+SSE transport is
+not implemented.
+
+### MCP OAuth
+
+Save your HTTP server with an empty bearer environment field, then reopen `/mcp`
+and press **a**, or run:
+
+```sh
+habibi mcp login remote
+habibi mcp status remote
+habibi mcp logout remote
+# For servers without dynamic public-client registration:
+habibi mcp login remote --client-id YOUR_PUBLIC_CLIENT_ID --callback-port 8765 --scope tools
+```
+
+The flow discovers protected-resource / authorization-server metadata, uses an
+S256 PKCE challenge and state validation, and binds a loopback callback before
+opening the browser. Pre-registered clients must permit the displayed
+`http://127.0.0.1:PORT/callback` redirect; omit `--callback-port` to allocate a free
+port. `--scope` is repeatable; otherwise initial scopes come from discovery.
+Only public clients are supported (no client secrets). Servers must publish OAuth
+metadata with an issuer and support either dynamic public-client registration
+or a client ID supplied through the CLI. No automatic login or browser opening
+occurs during model/tool requests.
+
+OAuth credentials are stored separately from server configuration and journals
+under `$XDG_CONFIG_HOME/habibi/mcp-auth` (default `~/.config/habibi/mcp-auth`),
+with 0700 directories and 0600 files. They are **not encrypted at rest**. Keys bind
+to the full canonical server URL, not the display name; servers with the same URL
+share credentials. Refreshes use cross-process file locks and atomic writes.
+Automatic refresh runs on authenticated HTTP requests; an expired or rejected
+refresh token requires a new explicit login. Authentication changes through
+`/mcp` close existing connections; they reconnect on the next prompt. CLI logout
+removes local credentials only; already in-flight requests may complete. Revoke
+the application grant with the provider if needed. Never paste callbacks or
+credentials into the agent chat.
+
+Library hosts opt in with `mcp::connect_with_oauth_store` and supply the storage
+path themselves. `mcp::connect` keeps its existing explicit-bearer behavior.
+The OAuth SDK installs the ring rustls default only if the embedding process has
+not already selected a crypto provider.
 
 Tools are discovered on connection and named `mcp__SERVER__TOOL`. Server names use
 1–24 ASCII letters, digits or hyphens; the complete tool identifier must fit

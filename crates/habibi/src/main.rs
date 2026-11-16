@@ -3,6 +3,7 @@ mod defaults;
 mod headless;
 mod inspect;
 mod login;
+mod mcp_auth;
 mod mcp_ui;
 mod program_status;
 mod tui;
@@ -14,7 +15,7 @@ use libhabibi::{
 };
 use std::{io::IsTerminal, path::PathBuf};
 
-const HELP: &str = "habibi — a native Rust coding agent (experimental)\n\nUsage:\n  habibi [--provider codex|claude|ollama] [--model ID] [--cwd DIR] [--skill-dir DIR] [--no-sticky-skills]\n  habibi [--ollama-url http://127.0.0.1:11434]\n  habibi -p \"PROMPT\" [--yolo]\n  habibi --rpc [-p \"PROMPT\"] [--yolo]\n  habibi models [codex|claude|ollama] [--ollama-url URL]\n  habibi --resume SESSION.jsonl\n  habibi login codex|claude\n  habibi logout codex|claude\n\nSubscriptions use direct OAuth/model requests, never provider agent subprocesses.\nAdapters are experimental and not guaranteed provider-approved.\nTools ask by default; /settings offers explicit YOLO auto-approval. Shell commands and MCP servers are NOT sandboxed.\nMCP and code mode are enabled by default; toggle in /settings.\nMCP reads only $XDG_CONFIG_HOME/habibi/mcp.json (or ~/.config/habibi/mcp.json). Configured programs are trusted; no project discovery.\nCode mode nested tools still require approval.\n\nTUI: Enter submit/steer; Alt-Enter follow-up; Ctrl-Enter/Ctrl-J newline; PgUp/PgDn scroll; Esc interrupt; Ctrl-C cancel or quit.\nHeadless: -p runs once; --rpc serves JSON Lines on stdin/stdout. Tools deny by default; --yolo explicitly approves all.\nCommands: /mcp, /inspect, /compact, /models, /model, /settings, /update, /quit, /help. Subscriptions require login. Ollama requires a running server and an installed tool-capable model.\n";
+const HELP: &str = "habibi — a native Rust coding agent (experimental)\n\nUsage:\n  habibi [--provider codex|claude|ollama] [--model ID] [--cwd DIR] [--skill-dir DIR] [--no-sticky-skills]\n  habibi [--ollama-url http://127.0.0.1:11434]\n  habibi -p \"PROMPT\" [--yolo]\n  habibi --rpc [-p \"PROMPT\"] [--yolo]\n  habibi models [codex|claude|ollama] [--ollama-url URL]\n  habibi --resume SESSION.jsonl\n  habibi login codex|claude\n  habibi logout codex|claude\n  habibi mcp login|status|logout SERVER [--client-id ID] [--scope SCOPE] [--callback-port PORT]\n\nSubscriptions use direct OAuth/model requests, never provider agent subprocesses.\nAdapters are experimental and not guaranteed provider-approved.\nTools ask by default; /settings offers explicit YOLO auto-approval. Shell commands and MCP servers are NOT sandboxed.\nMCP and code mode are enabled by default; toggle in /settings.\nMCP reads only $XDG_CONFIG_HOME/habibi/mcp.json (or ~/.config/habibi/mcp.json). Configured programs are trusted; no project discovery.\nCode mode nested tools still require approval.\n\nTUI: Enter submit/steer; Alt-Enter follow-up; Ctrl-Enter/Ctrl-J newline; PgUp/PgDn scroll; Esc interrupt; Ctrl-C cancel or quit.\nHeadless: -p runs once; --rpc serves JSON Lines on stdin/stdout. Tools deny by default; --yolo explicitly approves all.\nCommands: /mcp, /inspect, /compact, /models, /model, /settings, /update, /quit, /help. Subscriptions require login. Ollama requires a running server and an installed tool-capable model.\n";
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
@@ -29,6 +30,9 @@ async fn main() -> Result<()> {
     }
     if args.first().is_some_and(|a| a == "models") {
         return list_models(&args[1..]).await;
+    }
+    if args.first().is_some_and(|a| a == "mcp") {
+        return mcp_auth::cli(&args[1..]).await;
     }
     let auth = AuthStore::new(base_dir("XDG_CONFIG_HOME", ".config")?.join("habibi/auth"));
     if args.first().is_some_and(|a| a == "login" || a == "logout") {
@@ -303,7 +307,7 @@ async fn connect_mcp(session: &mut Session) -> Result<()> {
         "MCP configuration exceeds 1 MiB"
     );
     let config = serde_json::from_slice(&bytes).context("Invalid user MCP configuration")?;
-    libhabibi::mcp::connect(session, config).await?;
+    libhabibi::mcp::connect_with_oauth_store(session, config, Some(&mcp_auth::root()?)).await?;
     Ok(())
 }
 

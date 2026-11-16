@@ -998,6 +998,7 @@ pub async fn run(session: Session, path: PathBuf) -> Result<()> {
                         match method {
                             "status" => return Ok(json!({"session_id":session_id,"busy":job.is_some(),"stopping":interrupted,"queued":view.followups.len(),"pending_approvals":view.pending.iter().map(|(call,_)| &call.id).collect::<Vec<_>>(),"permission":view.pending.as_ref().map(|(call,_)|call),"socket":control.path})),
                             "prompt" | "follow_up" | "steer" => {
+                                ensure!(!view.mcp_manager.as_ref().is_some_and(|m| m.authenticating()), "MCP authentication in progress; finish or cancel it first");
                                 let text = crate::control::text(params)?;
                                 ensure!(!interrupted, "Run is stopping; wait for idle");
                                 if method == "steer" {
@@ -1037,6 +1038,12 @@ pub async fn run(session: Session, path: PathBuf) -> Result<()> {
                     if shutdown { break; }
                 }
                 _=tick.tick()=>{
+                    if let Some(manager) = &mut view.mcp_manager {
+                        let (changed, reconnect) = manager.poll_auth();
+                        dirty |= changed;
+                        if reconnect && let Some(session) = session.as_mut() { session.disconnect_mcp(); }
+                    }
+
                     if view.busy && view.pending.is_none() && view.status != "Cancelling…" && last_animation.elapsed() >= Duration::from_millis(100) {
                         view.animation_frame = (view.animation_frame + 1) % 10;
                         last_animation = Instant::now();
@@ -1131,6 +1138,11 @@ pub async fn run(session: Session, path: PathBuf) -> Result<()> {
                                 continue;
                             }
                             if key.code==KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                                if let Some(manager) = &mut view.mcp_manager && manager.authenticating() {
+                                    manager.key(crossterm::event::KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+                                    continue;
+                                }
+
                                 if let Some(cancel)=&cancellation {cancel.cancel();interrupted=true;program_status.report(crate::program_status::Status::Idle);view.followups.clear();view.pending=None;view.details=None;view.status="Cancelling…".into();}else{break}
                                 continue
                             }

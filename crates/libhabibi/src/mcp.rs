@@ -52,6 +52,15 @@ pub struct StdioServer {
 /// Tool calls still require ordinary session approval. Connections live as long
 /// as their registered tools; dropping them closes the SDK service/child process.
 pub async fn connect(session: &mut Session, config: Config) -> Result<usize> {
+    connect_with_oauth_store(session, config, None).await
+}
+
+/// Opt in to endpoint-bound OAuth credentials stored at a caller-owned path.
+pub async fn connect_with_oauth_store(
+    session: &mut Session,
+    config: Config,
+    oauth_root: Option<&Path>,
+) -> Result<usize> {
     ensure!(
         config.servers.len() <= 32,
         "At most 32 MCP servers are supported"
@@ -74,7 +83,7 @@ pub async fn connect(session: &mut Session, config: Config) -> Result<usize> {
         );
         let service = tokio::time::timeout(
             Duration::from_secs(30),
-            start(&config, &session.config().workspace),
+            start(&config, &session.config().workspace, oauth_root),
         )
         .await
         .context("MCP initialization timed out")??;
@@ -88,7 +97,12 @@ pub async fn connect(session: &mut Session, config: Config) -> Result<usize> {
                     .list_tools(cursor.clone().map(|cursor| {
                         rmcp::model::PaginatedRequestParams::default().with_cursor(Some(cursor))
                     }))
-                    .await?;
+                    .await
+                    .map_err(|_| {
+                        anyhow::anyhow!(
+                            "MCP tool discovery failed; check connection and authentication"
+                        )
+                    })?;
                 discovered.extend(page.tools);
                 ensure!(
                     discovered.len() <= 256,
@@ -136,7 +150,11 @@ pub async fn connect(session: &mut Session, config: Config) -> Result<usize> {
     Ok(count)
 }
 
-async fn start(config: &Server, workspace: &Path) -> Result<RunningService<RoleClient, ()>> {
+async fn start(
+    config: &Server,
+    workspace: &Path,
+    oauth_root: Option<&Path>,
+) -> Result<RunningService<RoleClient, ()>> {
     match config {
         Server::Stdio(config) => start_stdio(config, workspace).await,
         Server::Http(config) => {
@@ -145,22 +163,7 @@ async fn start(config: &Server, workspace: &Path) -> Result<RunningService<RoleC
                 streamable_http_client::StreamableHttpClientTransportConfig,
             };
             validate_url(&config.url)?;
-            // Never follow redirects with authorization. Only the explicit
-            // environment reference supplies server authentication.
-            let roots =
-                rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-            let tls = rustls::ClientConfig::builder_with_provider(Arc::new(
-                rustls::crypto::ring::default_provider(),
-            ))
-            .with_safe_default_protocol_versions()?
-            .with_root_certificates(roots)
-            .with_no_client_auth();
-            let client = reqwest_mcp::Client::builder()
-                .tls_backend_preconfigured(tls)
-                .redirect(reqwest_mcp::redirect::Policy::none())
-                .connect_timeout(Duration::from_secs(15))
-                .timeout(Duration::from_secs(120))
-                .build()?;
+            let client = http_client()?;
             let mut transport_config =
                 StreamableHttpClientTransportConfig::with_uri(config.url.clone());
             if let Some(variable) = &config.bearer_token_env {
@@ -170,15 +173,48 @@ async fn start(config: &Server, workspace: &Path) -> Result<RunningService<RoleC
                 ensure!(!token.is_empty(), "MCP bearer token is empty");
                 transport_config = transport_config.auth_header(token);
             }
+            if config.bearer_token_env.is_none()
+                && let Some(root) = oauth_root
+            {
+                let store = crate::mcp_oauth::Store::new(root, &config.url)?;
+                if store.has_credentials()? {
+                    let manager = store.manager(&config.url).await?;
+                    let client = rmcp::transport::auth::AuthClient::new(client, manager);
+                    let transport =
+                        StreamableHttpClientTransport::with_client(client, transport_config);
+                    return ().serve(transport).await.map_err(|_| {
+                        anyhow::anyhow!(
+                            "MCP OAuth handshake failed; retry or run `habibi mcp login SERVER`"
+                        )
+                    });
+                }
+            }
             let transport = StreamableHttpClientTransport::with_client(client, transport_config);
             ().serve(transport)
                 .await
-                .context("MCP HTTP handshake failed (OAuth login is not yet supported)")
+                .context("MCP HTTP handshake failed (use /mcp Authenticate or `habibi mcp login SERVER` if authorization is required)")
         }
     }
 }
 
-fn validate_url(raw: &str) -> Result<()> {
+pub(crate) fn http_client() -> Result<reqwest_mcp::Client> {
+    let roots = rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let tls = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()?
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+    reqwest_mcp::Client::builder()
+        .tls_backend_preconfigured(tls)
+        .redirect(reqwest_mcp::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(15))
+        .timeout(Duration::from_secs(120))
+        .build()
+        .map_err(Into::into)
+}
+
+pub(crate) fn validate_url(raw: &str) -> Result<()> {
     let url = url::Url::parse(raw)?;
     let loopback = url.host_str().is_some_and(|host| {
         host == "localhost"
@@ -251,7 +287,7 @@ impl Tool for McpTool {
             let result = tokio::select! {
                 biased;
                 _ = context.cancel.cancelled() => anyhow::bail!("MCP call cancelled; remote side effects may have completed"),
-                result = tokio::time::timeout(Duration::from_secs(120), self.service.call_tool(request)) => result.context("MCP call timed out; remote side effects may have completed")??,
+                result = tokio::time::timeout(Duration::from_secs(120), self.service.call_tool(request)) => result.context("MCP call timed out; remote side effects may have completed")?.map_err(|_| anyhow::anyhow!("MCP tool request failed; check connection and authentication. Remote side effects may have completed"))?,
             };
             let is_error = result.is_error.unwrap_or(false);
             let value = serde_json::to_value(result)?;
@@ -390,6 +426,7 @@ mod tests {
                     disabled: false,
                 }),
                 Path::new("."),
+                None,
             ),
         )
         .await
