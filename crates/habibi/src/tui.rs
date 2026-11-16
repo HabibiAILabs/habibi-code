@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail, ensure};
 use crossterm::{
     event::{
         self, DisableBracketedPaste, EnableBracketedPaste, EnableMouseCapture,
@@ -21,7 +21,7 @@ use ratatui::{
 };
 use std::{
     collections::VecDeque,
-    io::{self, Stdout},
+    io,
     path::PathBuf,
     time::{Duration, Instant},
 };
@@ -99,7 +99,7 @@ impl SettingsDialog {
         }
     }
     fn count(&self) -> usize {
-        if self.model_only { 1 } else { 12 }
+        if self.model_only { 1 } else { 14 }
     }
     fn values(&self) -> Result<(String, usize, usize, u8)> {
         let values = (
@@ -141,6 +141,20 @@ impl SettingsDialog {
                 None => self.model_choices.len() - 1,
             };
             self.fields[0] = self.model_choices[index].clone();
+            return;
+        }
+        if matches!(self.selected, 12 | 13)
+            && matches!(
+                key.code,
+                KeyCode::Char(' ') | KeyCode::Left | KeyCode::Right
+            )
+        {
+            let value = if self.selected == 12 {
+                &mut self.preferences.mcp_enabled
+            } else {
+                &mut self.preferences.codemode_enabled
+            };
+            *value = !*value;
             return;
         }
         if self.selected == 10
@@ -235,7 +249,7 @@ impl SettingsDialog {
     fn draw(&self, frame: &mut ratatui::Frame) {
         let screen = frame.area();
         let width = screen.width.min(76);
-        let height = screen.height.min(25);
+        let height = screen.height.min(27);
         let area = Rect::new(
             screen.x + (screen.width - width) / 2,
             screen.y + (screen.height - height) / 2,
@@ -358,6 +372,26 @@ impl SettingsDialog {
                     "Skill directories (JSON list)",
                     visible(&self.fields[4]),
                 ),
+                (
+                    12,
+                    "MCP (reconnect on next prompt)",
+                    if self.preferences.mcp_enabled {
+                        "on"
+                    } else {
+                        "off"
+                    }
+                    .into(),
+                ),
+                (
+                    13,
+                    "Code mode",
+                    if self.preferences.codemode_enabled {
+                        "on"
+                    } else {
+                        "off"
+                    }
+                    .into(),
+                ),
             ] {
                 lines.push(Line::styled(
                     format!(
@@ -442,11 +476,15 @@ struct View {
     lines: VecDeque<String>,
     bytes: usize,
     input: String,
+    skills: Vec<(String, String)>,
+    completion_index: usize,
+    completion_dismissed: bool,
     scroll: u16,
     pending: Option<(ToolCall, oneshot::Sender<bool>)>,
     status: String,
     title: String,
     dialog: Option<SettingsDialog>,
+    mcp_manager: Option<crate::mcp_ui::Manager>,
     inspector: Option<crate::inspect::Inspector>,
     inspection: (Vec<(String, String)>, Vec<Message>),
     preferences: Preferences,
@@ -467,6 +505,53 @@ struct View {
     update_available: Option<String>,
 }
 impl View {
+    fn reset_completion(&mut self) {
+        self.completion_index = 0;
+        self.completion_dismissed = false;
+    }
+    fn suggestions(&self) -> Vec<Suggestion> {
+        if self.completion_dismissed
+            || self.dialog.is_some()
+            || self.mcp_manager.is_some()
+            || self.inspector.is_some()
+            || self.details.is_some()
+            || self.pending.is_some()
+        {
+            return Vec::new();
+        }
+        slash_matches(&self.input, &self.skills)
+    }
+    fn completion_key(&mut self, key: KeyEvent) -> bool {
+        if key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
+            return false;
+        }
+        let matches = self.suggestions();
+        if matches.is_empty() {
+            return false;
+        }
+        self.completion_index = self.completion_index.min(matches.len() - 1);
+        match key.code {
+            KeyCode::Down => self.completion_index = (self.completion_index + 1) % matches.len(),
+            KeyCode::Up | KeyCode::BackTab => {
+                self.completion_index = (self.completion_index + matches.len() - 1) % matches.len()
+            }
+            KeyCode::Tab | KeyCode::Enter
+                if key.code == KeyCode::Tab
+                    || self.input != matches[self.completion_index].command =>
+            {
+                self.input = format!("{} ", matches[self.completion_index].command);
+                self.input_cursor = self.input.len();
+                self.reset_completion();
+            }
+            KeyCode::Esc if !self.busy => self.completion_dismissed = true,
+            _ => return false,
+        }
+        true
+    }
+
     fn append(&mut self, text: &str) {
         let before = if self.scroll > 0 {
             self.rendered_rows()
@@ -565,6 +650,18 @@ impl View {
     }
     fn event(&mut self, event: Event) {
         match event {
+            Event::ProviderRetry {
+                retry,
+                max_retries,
+                delay_secs,
+            } => {
+                self.status = format!(
+                    "Provider retry {retry}/{max_retries} in {delay_secs}s · Esc/Ctrl-C cancel"
+                );
+                self.message(&format!(
+                    "Temporary provider failure · retry {retry}/{max_retries} in {delay_secs}s"
+                ));
+            }
             Event::Inspection {
                 definitions,
                 history,
@@ -623,8 +720,10 @@ impl View {
                 output, is_error, ..
             } => {
                 self.message(&result_summary(&output, is_error));
-                self.activity = Activity::Thinking;
-                self.status = "Thinking · Esc/Ctrl-C cancel".into();
+                if self.pending.is_none() {
+                    self.activity = Activity::Thinking;
+                    self.status = "Thinking · Esc/Ctrl-C cancel".into();
+                }
             }
             Event::RunFinished { .. } => {
                 self.busy = false;
@@ -693,13 +792,16 @@ impl View {
         parts.join(" · ")
     }
 
-    fn draw(&mut self, terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
+    fn draw<B: ratatui::backend::Backend>(&mut self, terminal: &mut Terminal<B>) -> Result<()> {
         terminal.draw(|frame| {
             let area = frame.area();
             let (input_lines, cursor_row, cursor_col) = wrap_input(&self.input, self.input_cursor, area.width.saturating_sub(2).max(1) as usize);
             let input_height = (input_lines.len() as u16).saturating_add(2).clamp(3, (area.height / 2).clamp(3, 8));
+            let suggestions = self.suggestions();
+            let suggestion_rows = suggestions.len().min(area.height.saturating_sub(input_height + 5) as usize);
             let sections = Layout::vertical([
                 Constraint::Min(1),
+                Constraint::Length(suggestion_rows as u16),
                 Constraint::Length(input_height),
                 Constraint::Length(2),
             ])
@@ -724,7 +826,13 @@ impl View {
                     ),
                 sections[0],
             );
-            let input_rows = sections[1].height.saturating_sub(2) as usize;
+            let selected = self.completion_index.min(suggestions.len().saturating_sub(1));
+            let start = selected.saturating_sub(suggestion_rows.saturating_sub(1));
+            frame.render_widget(Paragraph::new(suggestions.iter().enumerate().skip(start).take(suggestion_rows).map(|(i, entry)| {
+                Line::styled(format!("{} {}  {}", if i == selected { "▸" } else { " " }, entry.command, one_line(&entry.description, 100)),
+                    if i == selected { Style::default().fg(Color::Black).bg(Color::Cyan) } else { Style::default().fg(Color::DarkGray) })
+            }).collect::<Vec<_>>()), sections[1]);
+            let input_rows = sections[2].height.saturating_sub(2) as usize;
             let input_scroll = cursor_row.saturating_sub(input_rows.saturating_sub(1));
             frame.render_widget(
                 Paragraph::new(input_lines.iter().map(|line| Line::raw(line.clone())).collect::<Vec<_>>())
@@ -732,22 +840,22 @@ impl View {
                     .block(Block::default().borders(Borders::ALL)
                         .border_style(Style::default().fg(if self.pending.is_some() { Color::Yellow } else if self.busy { Color::Cyan } else { Color::Reset }))
                         .title(self.prompt_title())),
-                sections[1],
+                sections[2],
             );
             frame.render_widget(
-                Paragraph::new({ let matches = slash_matches(&self.input); if matches.is_empty() { self.status_bar() } else { format!("{} · Tab complete: {}", self.status_bar(), matches.join("  ")) } })
+                Paragraph::new(self.status_bar())
                     .wrap(Wrap { trim: false })
                     .style(Style::default().fg(if self.yolo_active {
                         Color::Yellow
                     } else {
                         Color::Cyan
                     })),
-                sections[2],
+                sections[3],
             );
-            if self.dialog.is_none() && self.inspector.is_none() && self.details.is_none() && sections[1].width > 2 && sections[1].height > 2 {
+            if self.dialog.is_none() && self.mcp_manager.is_none() && self.inspector.is_none() && self.details.is_none() && sections[2].width > 2 && sections[2].height > 2 {
                 frame.set_cursor_position((
-                    sections[1].x + 1 + cursor_col as u16,
-                    sections[1].y + 1 + cursor_row.saturating_sub(input_scroll) as u16,
+                    sections[2].x + 1 + cursor_col as u16,
+                    sections[2].y + 1 + cursor_row.saturating_sub(input_scroll) as u16,
                 ));
             }
             if let Some(details) = &self.details {
@@ -759,6 +867,7 @@ impl View {
                     .scroll((self.details_scroll, 0)).block(Block::default().borders(Borders::ALL)
                     .title(" Proposed tool arguments · PgUp/PgDn scroll · F2 close · Esc interrupt ")), area);
             }
+            if let Some(manager) = &self.mcp_manager { manager.draw(frame); }
             if let Some(dialog) = &self.dialog {
                 dialog.draw(frame);
             }
@@ -771,6 +880,8 @@ impl View {
 }
 
 pub async fn run(session: Session, path: PathBuf) -> Result<()> {
+    let session_id = session.id().to_string();
+    let mut control = crate::control::Control::bind(&session_id, &path)?;
     // Restore the terminal even on panic, before Rust's normal panic report.
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -785,10 +896,14 @@ pub async fn run(session: Session, path: PathBuf) -> Result<()> {
         lines: VecDeque::new(),
         bytes: 0,
         input: String::new(),
+        skills: Vec::new(),
+        completion_index: 0,
+        completion_dismissed: false,
         scroll: 0,
         pending: None,
         status: "Enter submit · PgUp/PgDn scroll · Ctrl-C quit · /help".into(),
         dialog: None,
+        mcp_manager: None,
         inspector: None,
         inspection: Default::default(),
         preferences: session.config().preferences.clone(),
@@ -814,6 +929,7 @@ pub async fn run(session: Session, path: PathBuf) -> Result<()> {
         )),
     };
     view.message(&format!("Workspace: {}\nSession: {}\nShell commands are not sandboxed. /settings controls tool permissions; /models lists model choices.",session.config().workspace.display(),path.display()));
+    view.message(&format!("Control socket: {}", control.path.display()));
     if session.config().provider == libhabibi::Provider::Ollama {
         view.message(&format!(
             "Ollama: {} (no login required). Use an installed tool-capable model.",
@@ -849,7 +965,7 @@ pub async fn run(session: Session, path: PathBuf) -> Result<()> {
     view.inspection = (session.inspect_context(), session.tool_history().to_vec());
     let mut current_config = session.config().clone();
     let mut deferred_settings: Option<SettingsDialog> = None;
-    let mut completion: Option<(String, usize)> = None;
+    view.skills = session.skill_catalog();
     let mut session = Some(session);
     let mut job: Option<Job> = None;
     let mut cancellation: Option<CancellationToken> = None;
@@ -872,6 +988,54 @@ pub async fn run(session: Session, path: PathBuf) -> Result<()> {
         loop {
             // Render at most once per frame, not once per token or tool-output chunk.
             tokio::select! {
+                Some(request) = control.requests.recv() => {
+                    use serde_json::json;
+                    let id = request.value["id"].clone();
+                    let mut shutdown = false;
+                    let result = (|| -> Result<serde_json::Value> {
+                        let method = request.value["method"].as_str().context("Missing method")?;
+                        let params = &request.value["params"];
+                        match method {
+                            "status" => return Ok(json!({"session_id":session_id,"busy":job.is_some(),"stopping":interrupted,"queued":view.followups.len(),"pending_approvals":view.pending.iter().map(|(call,_)| &call.id).collect::<Vec<_>>(),"permission":view.pending.as_ref().map(|(call,_)|call),"socket":control.path})),
+                            "prompt" | "follow_up" | "steer" => {
+                                let text = crate::control::text(params)?;
+                                ensure!(!interrupted, "Run is stopping; wait for idle");
+                                if method == "steer" {
+                                    steering_sender.as_ref().context("No active run to steer")?.try_send(text).context("Steering queue full or run ending")?;
+                                    view.steering_count += 1;
+                                } else if job.is_some() {
+                                    ensure!(method != "prompt", "Agent busy; use steer or follow_up");
+                                    ensure!(view.followups.len() < 32, "Follow-up queue full");
+                                    view.followups.push_back(text);
+                                } else {
+                                    let running = session.take().context("Session unavailable")?;
+                                    view.message(&format!("You · socket\n{text}"));
+                                    let (next_job, cancel, sender) = start_job(running, text, tx.clone());
+                                    job = Some(next_job); cancellation = Some(cancel); steering_sender = Some(sender);
+                                }
+                            }
+                            "approve" => {
+                                let call_id = params["call_id"].as_str().context("Missing call_id")?;
+                                let allow = params["allow"].as_bool().context("allow must be boolean")?;
+                                ensure!(view.pending.as_ref().is_some_and(|(call,_)|call.id == call_id), "Unknown or expired approval");
+                                let (_, reply) = view.pending.take().unwrap();
+                                reply.send(allow).map_err(|_|anyhow::anyhow!("Approval expired"))?;
+                                view.details = None;
+                                program_status.report(crate::program_status::Status::Thinking);
+                            }
+                            "stop" | "shutdown" => {
+                                if let Some(cancel) = &cancellation { cancel.cancel(); interrupted = true; view.status = "Cancelling…".into(); }
+                                view.followups.clear(); view.pending = None; view.details = None;
+                                shutdown = method == "shutdown";
+                            }
+                            _ => bail!("Unknown method: {method}"),
+                        }
+                        Ok(json!({"accepted":true}))
+                    })();
+                    request.reply.send(crate::control::response(id, result)).await;
+                    dirty = true;
+                    if shutdown { break; }
+                }
                 _=tick.tick()=>{
                     if view.busy && view.pending.is_none() && view.status != "Cancelling…" && last_animation.elapsed() >= Duration::from_millis(100) {
                         view.animation_frame = (view.animation_frame + 1) % 10;
@@ -893,6 +1057,7 @@ pub async fn run(session: Session, path: PathBuf) -> Result<()> {
                             view.message(&format!("Queued settings failed: {error:#}"));
                         }
                         current_config = session.as_ref().unwrap().config().clone();
+                        view.skills = session.as_ref().unwrap().skill_catalog();
                         view.inspection = (session.as_ref().unwrap().inspect_context(), session.as_ref().unwrap().tool_history().to_vec());
                         if let Err(error)=&result {view.message(&format!("Stopped: {error:#}"));}
                         program_status.report(if interrupted { crate::program_status::Status::Idle } else if result.is_err() { crate::program_status::Status::Error } else { crate::program_status::Status::Done });
@@ -945,11 +1110,12 @@ pub async fn run(session: Session, path: PathBuf) -> Result<()> {
                             dirty=true;
                         }
                         TerminalEvent::Paste(text)=>{
-                            completion = None;
+                            view.reset_completion();
                             program_status.acknowledge();
                             if view.inspector.is_some() { continue; }
+                            if let Some(manager) = &mut view.mcp_manager { manager.paste(&text); dirty = true; continue; }
                             if let Some(dialog) = &mut view.dialog {
-                                if (3..9).contains(&dialog.selected) || dialog.selected == 10 { continue; }
+                                if (3..9).contains(&dialog.selected) || dialog.selected == 10 || dialog.selected >= 12 { continue; }
                                 dialog.confirm_yolo = false;
                                 let field = &mut dialog.fields[if dialog.selected == 9 { 3 } else if dialog.selected == 11 { 4 } else { dialog.selected }];
                                 let text = visible(&text).replace('\n', " ");
@@ -967,6 +1133,18 @@ pub async fn run(session: Session, path: PathBuf) -> Result<()> {
                             if key.code==KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
                                 if let Some(cancel)=&cancellation {cancel.cancel();interrupted=true;program_status.report(crate::program_status::Status::Idle);view.followups.clear();view.pending=None;view.details=None;view.status="Cancelling…".into();}else{break}
                                 continue
+                            }
+                            if let Some(manager) = &mut view.mcp_manager {
+                                match manager.key(key) {
+                                    crate::mcp_ui::Action::None => {},
+                                    crate::mcp_ui::Action::Close => view.mcp_manager = None,
+                                    crate::mcp_ui::Action::Saved => {
+                                        view.mcp_manager = None;
+                                        session.as_mut().context("Session unavailable")?.disconnect_mcp();
+                                        view.message("MCP configuration saved. Connections closed; enabled servers reconnect on the next prompt.");
+                                    }
+                                }
+                                continue;
                             }
                             if view.dialog.is_some() {
                                 match key.code {
@@ -996,17 +1174,13 @@ pub async fn run(session: Session, path: PathBuf) -> Result<()> {
                                 }
                                 continue;
                             }
-                            if key.code != KeyCode::Tab { completion = None; }
+                            if view.completion_key(key) { continue; }
+                            if key.code == KeyCode::Enter && !key.modifiers.contains(KeyModifiers::CONTROL) && view.details.is_none()
+                                && let Some(prompt) = skill_prompt(&view.input, &view.skills) {
+                                view.input = prompt; view.input_cursor = view.input.len();
+                            }
+                            if !matches!(key.code, KeyCode::Up | KeyCode::Down | KeyCode::Tab | KeyCode::BackTab) { view.reset_completion(); }
                             match key.code {
-                                KeyCode::Tab => {
-                                    let (prefix, index) = completion.take().unwrap_or_else(|| (view.input.clone(), 0));
-                                    let matches = slash_matches(&prefix);
-                                    if let Some(command) = matches.get(index % matches.len().max(1)) {
-                                        view.input = (*command).into();
-                                        view.input_cursor = view.input.len();
-                                        completion = Some((prefix, index + 1));
-                                    }
-                                }
                                 KeyCode::F(2) if view.pending.is_some()=>{
                                     if view.details.take().is_none() {
                                         let call = &view.pending.as_ref().unwrap().0;
@@ -1058,6 +1232,11 @@ pub async fn run(session: Session, path: PathBuf) -> Result<()> {
                                             let (next_job, cancel, sender) = start_job(running, "/compact".into(), tx.clone());
                                             job = Some(next_job); cancellation = Some(cancel); steering_sender = Some(sender); interrupted = false;
                                         }
+                                        "/mcp" if job.is_some() => view.message("MCP configuration requires an idle agent. Stop the run first."),
+                                        "/mcp" => match crate::mcp_ui::Manager::open() {
+                                            Ok(manager) => view.mcp_manager = Some(manager),
+                                            Err(error) => view.message(&format!("Cannot open MCP manager: {error:#}")),
+                                        },
                                         "/inspect" => {
                                             view.inspector = Some(crate::inspect::Inspector::from_snapshot(view.inspection.0.clone(), &view.inspection.1));
                                            if job.is_some() { view.message("Inspector: latest context-boundary snapshot; the agent continues running. Close and reopen to refresh."); }
@@ -1079,8 +1258,8 @@ pub async fn run(session: Session, path: PathBuf) -> Result<()> {
                                                 view.message(&format!("Bundled {provider} subscription models (account availability varies):\n{}\n/model: Ctrl-N/P selects a model, or type any model ID; Enter saves it.", provider.models().join("\n")));
                                             }
                                         }
-                                        "/help"=>view.message("/inspect: context and tool-call inspector · /compact: summarize context · /models: list models · /model: choose or edit model ID · /settings: model, limits, status bar, tool permissions · /update: upgrade instructions · /quit: exit\nEnter: submit/steer · Alt-Enter: follow-up · Ctrl-Enter/Ctrl-J: newline\nTab: complete/cycle slash commands · PgUp/PgDn or mouse wheel: scroll · Ctrl-U: clear input · F2: inspect approval\nCommands work during execution; settings apply after the run. /compact and /quit require idle. Esc/Ctrl-C cancels; completed edits are not undone.\nAsk mode: Ctrl-Y allows once, Ctrl-N denies (or y/n in F2 inspector). YOLO auto-approves all tools. Neither mode is a sandbox.\nLogin: subscriptions use habibi login codex|claude outside the TUI. Ollama needs no login.\nResume: habibi --resume <session path shown above>."),
-                                        command if command.starts_with('/') => view.message("Unknown command. Available: /inspect, /compact, /models, /model, /settings, /update, /help, /quit, /exit."),
+                                        "/help"=>view.message("/mcp: add/configure/disable/remove MCP servers · /inspect: context and tool-call inspector · /compact: summarize context · /models: list models · /model: choose or edit model ID · /settings: model, limits, status bar, tool permissions · /update: upgrade instructions · /quit: exit\nEnter: submit/steer · Alt-Enter: follow-up · Ctrl-Enter/Ctrl-J: newline\n↑/↓: select suggestion · Tab: complete command or skill · /skill:name [request]: invoke a skill · PgUp/PgDn or mouse wheel: scroll · Ctrl-U: clear input · F2: inspect approval\nCommands work during execution; settings apply after the run. /compact and /quit require idle. Esc/Ctrl-C cancels; completed edits are not undone.\nAsk mode: Ctrl-Y allows once, Ctrl-N denies (or y/n in F2 inspector). YOLO auto-approves all tools. Neither mode is a sandbox.\nLogin: subscriptions use habibi login codex|claude outside the TUI. Ollama needs no login.\nResume: habibi --resume <session path shown above>."),
+                                        command if command.starts_with('/') => view.message("Unknown command. Available: /mcp, /inspect, /compact, /models, /model, /settings, /update, /help, /quit, /exit."),
                                         _=>{
                                             view.scroll=0;view.message(&format!("You\n{prompt}"));
                                             let running=session.take().context("Session unavailable")?;
@@ -1164,6 +1343,7 @@ fn truncate(text: &str, limit: usize) -> String {
     )
 }
 const SLASH_COMMANDS: &[&str] = &[
+    "/mcp",
     "/inspect",
     "/settings",
     "/models",
@@ -1175,15 +1355,72 @@ const SLASH_COMMANDS: &[&str] = &[
     "/exit",
 ];
 
-fn slash_matches(input: &str) -> Vec<&'static str> {
+#[derive(Debug)]
+struct Suggestion {
+    command: String,
+    description: String,
+}
+
+fn slash_matches(input: &str, skills: &[(String, String)]) -> Vec<Suggestion> {
     if !input.starts_with('/') || input.chars().any(char::is_whitespace) {
         return Vec::new();
     }
-    SLASH_COMMANDS
+    let prefix = input.to_ascii_lowercase();
+    let descriptions = [
+        "Manage MCP servers",
+        "Inspect context and tool calls",
+        "Configure session settings",
+        "List models",
+        "Choose a model",
+        "Summarize context",
+        "Show help",
+        "Upgrade instructions",
+        "Quit",
+        "Quit",
+    ];
+    let mut matches: Vec<_> = SLASH_COMMANDS
         .iter()
-        .copied()
-        .filter(|command| command.starts_with(input))
-        .collect()
+        .zip(descriptions)
+        .filter(|(command, _)| command.starts_with(&prefix))
+        .map(|(command, description)| Suggestion {
+            command: (*command).into(),
+            description: description.into(),
+        })
+        .collect();
+    matches.extend(
+        skills
+            .iter()
+            .filter(|(name, _)| {
+                format!("/skill:{name}").starts_with(&prefix)
+                    || name.starts_with(prefix.trim_start_matches('/'))
+            })
+            .map(|(name, description)| Suggestion {
+                command: format!("/skill:{name}"),
+                description: format!("Skill · {description}"),
+            }),
+    );
+    // Exact matches first, then stable built-in/catalog order. Never show >5.
+    matches.sort_by_key(|entry| entry.command != prefix);
+    matches.truncate(5);
+    matches
+}
+
+fn skill_prompt(input: &str, skills: &[(String, String)]) -> Option<String> {
+    let rest = input.trim().strip_prefix("/skill:")?;
+    let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+    let name = &rest[..end];
+    if !skills.iter().any(|(known, _)| known == name) {
+        return None;
+    }
+    let request = rest[end..].trim();
+    Some(format!(
+        "Use the {name} skill for this request. Load it with load_skill before proceeding, unless it is already loaded.{}",
+        if request.is_empty() {
+            String::new()
+        } else {
+            format!("\n\n{request}")
+        }
+    ))
 }
 
 fn apply_settings(view: &mut View, session: &mut Session, dialog: &SettingsDialog) -> Result<()> {
@@ -1205,6 +1442,8 @@ fn apply_settings(view: &mut View, session: &mut Session, dialog: &SettingsDialo
         config.provider, config.model
     ));
     view.preferences = config.preferences.clone();
+    view.skills = session.skill_catalog();
+    view.reset_completion();
     view.yolo_active = config.preferences.yolo;
     view.context_limit = config.max_context_bytes;
     view.context_used = session.context_bytes();
@@ -1232,7 +1471,13 @@ fn start_job(
     let token = cancel.clone();
     let (sender, mut steering) = mpsc::channel(32);
     let job = tokio::spawn(async move {
-        let result = if prompt == "/compact" {
+        let connected = tokio::select! {
+            result = crate::connect_mcp(&mut session) => result,
+            _ = token.cancelled() => Err(anyhow::anyhow!("Cancelled")),
+        };
+        let result = if let Err(error) = connected {
+            Err(error)
+        } else if prompt == "/compact" {
             session.compact(events, token).await
         } else {
             session
@@ -1508,12 +1753,129 @@ mod tests {
 
     #[test]
     fn slash_suggestions_match_only_command_drafts() {
-        assert_eq!(slash_matches("/ins"), vec!["/inspect"]);
-        assert_eq!(slash_matches("/mod"), vec!["/models", "/model"]);
-        assert_eq!(slash_matches("/"), SLASH_COMMANDS);
+        let names = |draft| {
+            slash_matches(draft, &[])
+                .into_iter()
+                .map(|s| s.command)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names("/ins"), vec!["/inspect"]);
+        assert_eq!(names("/mod"), vec!["/models", "/model"]);
+        assert_eq!(names("/"), SLASH_COMMANDS[..5]);
+        assert_eq!(names("/model")[0], "/model");
         for draft in ["", "hello", "/unknown", "/model name", "/inspect\n"] {
-            assert!(slash_matches(draft).is_empty(), "{draft:?}");
+            assert!(slash_matches(draft, &[]).is_empty(), "{draft:?}");
         }
+    }
+
+    #[test]
+    fn skill_completion_selection_and_invocation() {
+        let key = KeyEvent::new;
+        let mut view = test_view();
+        view.skills = vec![
+            ("review".into(), "Review code".into()),
+            ("release".into(), "Publish a release".into()),
+        ];
+        view.input = "/re".into();
+        assert_eq!(
+            view.suggestions()
+                .iter()
+                .map(|s| s.command.as_str())
+                .collect::<Vec<_>>(),
+            ["/skill:review", "/skill:release"]
+        );
+        assert!(view.completion_key(key(KeyCode::Down, KeyModifiers::NONE)));
+        assert!(view.completion_key(key(KeyCode::Tab, KeyModifiers::NONE)));
+        assert_eq!(view.input, "/skill:release ");
+        assert!(view.suggestions().is_empty());
+        view.insert("check the changelog");
+        let prompt = skill_prompt(&view.input, &view.skills).unwrap();
+        assert!(prompt.contains("release skill"));
+        assert!(prompt.contains("load_skill"));
+        assert!(prompt.ends_with("check the changelog"));
+        assert!(skill_prompt("/skill:missing", &view.skills).is_none());
+        assert!(skill_prompt("/settings", &view.skills).is_none());
+        view.input = "/skill:re".into();
+        assert_eq!(view.suggestions().len(), 2);
+        assert!(view.completion_key(key(KeyCode::Esc, KeyModifiers::NONE)));
+        assert!(view.suggestions().is_empty());
+        view.reset_completion();
+        view.busy = true;
+        assert!(
+            !view.completion_key(key(KeyCode::Esc, KeyModifiers::NONE)),
+            "Esc must still cancel active work"
+        );
+        assert!(
+            !view.completion_key(key(KeyCode::Enter, KeyModifiers::ALT)),
+            "Alt-Enter must retain follow-up semantics"
+        );
+        view.input = "/mod".into();
+        assert!(view.completion_key(key(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(view.input, "/models ");
+        view.input = "/model".into();
+        assert!(
+            !view.completion_key(key(KeyCode::Enter, KeyModifiers::NONE)),
+            "Exact command must submit"
+        );
+    }
+
+    #[test]
+    fn suggestions_render_as_five_rows_not_in_status_line() {
+        use ratatui::backend::TestBackend;
+        let mut view = test_view();
+        view.input = "/".into();
+        view.input_cursor = 1;
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        view.draw(&mut terminal).unwrap();
+        let buffer = terminal.backend().buffer();
+        let rows: Vec<String> = (0..24)
+            .map(|y| (0..100).map(|x| buffer[(x, y)].symbol()).collect())
+            .collect();
+        for command in &SLASH_COMMANDS[..5] {
+            assert_eq!(
+                rows.iter().filter(|line| line.contains(command)).count(),
+                if *command == "/model" { 2 } else { 1 }
+            );
+        }
+        assert!(!rows[22..].join("").contains("/inspect"));
+        assert!(!rows.join("").contains("Tab complete:"));
+        for (width, height) in [(1, 1), (12, 5), (30, 10)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            view.draw(&mut terminal).unwrap();
+        }
+        view.skills = vec![("demo".into(), "A skill\nwith \u{1b}controls".into())];
+        view.input = "/skill:".into();
+        view.input_cursor = view.input.len();
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        view.draw(&mut terminal).unwrap();
+        let content: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(content.contains("/skill:demo"));
+        assert!(!content.contains('\u{1b}'));
+    }
+
+    #[test]
+    fn retry_notice_preserves_running_state_and_permissions() {
+        let mut view = test_view();
+        view.event(Event::RunStarted);
+        view.event(Event::ProviderRetry {
+            retry: 2,
+            max_retries: 5,
+            delay_secs: 4,
+        });
+        assert!(view.busy);
+        assert!(!view.yolo_active);
+        assert!(view.pending.is_none());
+        assert!(
+            view.lines
+                .iter()
+                .any(|line| line.contains("retry 2/5 in 4s"))
+        );
     }
 
     #[test]
@@ -1537,11 +1899,15 @@ mod tests {
             lines: VecDeque::new(),
             bytes: 0,
             input: String::new(),
+            skills: Vec::new(),
+            completion_index: 0,
+            completion_dismissed: false,
             scroll: 0,
             pending: None,
             status: "Ready".into(),
             title: String::new(),
             dialog: None,
+            mcp_manager: None,
             inspector: None,
             inspection: Default::default(),
             preferences: Preferences::default(),
@@ -1576,6 +1942,7 @@ mod tests {
             status_context: false,
             status_hints: false,
             yolo: false,
+            ..Preferences::default()
         };
         assert_eq!(view.status_bar(), "");
         view.yolo_active = true;

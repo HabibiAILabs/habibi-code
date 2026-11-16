@@ -1,13 +1,17 @@
 # Habibi
 
-A small, native Rust coding-agent prototype: **`libhabibi` owns the agent loop; `habibi` is its full-screen terminal frontend.** No JavaScript runtime, Habibi daemon, or provider-agent subprocess (Ollama runs as a separate server). A best-effort background GitHub release check is the only idle network activity; it never contacts model providers.
+A small, native Rust coding-agent prototype: **`libhabibi` owns the agent loop; `habibi` is its full-screen terminal frontend.** No external JavaScript runtime, Habibi daemon, or provider-agent subprocess (Ollama runs as a separate server). Optional code mode embeds QuickJS; explicitly configured MCP servers may run as child processes. Without MCP connections, a best-effort background GitHub release check is the only idle network activity; it never contacts model providers.
 
-## What's new in v0.3.1
+## What's new in v0.4.0
 
 [Release notes](RELEASE_NOTES.md) · [Quick-start website](https://habibiailabs.github.io/habibi-code/)
 
+- **Control any instance:** private Unix sockets let other processes steer the TUI, headless runs, and RPC instances without taking over their terminal.
+- **Headless and RPC:** `-p` streams a one-shot response; `--rpc` provides persistent JSON Lines control with individual tool approvals.
+- **MCP and code mode:** manage trusted local/remote MCP servers with `/mcp`; embedded JavaScript can compose tools with bounded concurrency and per-call approvals.
+- **Provider retries:** transient connection and HTTP failures retry with cancellable backoff, without replaying partial streams.
 - **Commands during execution:** `/inspect`, `/settings`, `/model`, `/models`, `/help`, and `/update` work without interrupting the agent. Inspection shows the latest context-boundary snapshot; close and reopen to refresh.
-- **Slash-command suggestions:** type `/` to see matches; press Tab to complete and cycle them.
+- **Command and skill autocomplete:** type `/` for a five-item list above the prompt (not in the status line). Up/Down selects; Tab completes. Discovered skills appear as `/skill:name`.
 - **Safe settings changes:** changes saved during execution apply after the current run, before queued follow-ups. Active tool permissions stay unchanged. `/compact`, `/quit`, and `/exit` require idle.
 
 ### Also included from v0.3.0
@@ -91,7 +95,144 @@ target/release/habibi --resume /path/to/session.jsonl
 target/release/habibi logout codex
 ```
 
-`--resume` restores the saved model, provider, workspace, and history. It cannot be combined with overrides. Model availability depends on your account; use `--model` to override the defaults.
+`--resume` restores the saved model, provider, workspace, and history. It cannot be combined with model/workspace overrides. MCP/code-mode preferences are restored on resume. Model availability depends on your account; use `--model` to override the defaults.
+
+### Headless and RPC (experimental)
+
+```sh
+habibi -p 'Explain the architecture'             # stream text, then exit
+habibi -p 'Implement the fix and run tests' --yolo # explicitly trust all tools
+habibi --rpc                                    # persistent JSON Lines RPC
+habibi --rpc -p 'Start investigating this bug'
+```
+
+`-p` / `--prompt` runs without a terminal. Output goes to stdout; journal location
+and diagnostics go to stderr. Tools are denied unless `--yolo` is explicitly
+passed; saved TUI YOLO settings do not silently enable headless approvals.
+RPC clients can answer individual approval requests and send `prompt`, `steer`,
+`follow_up`, `stop`, `status`, and `shutdown` requests. Stdio RPC uses stdin/stdout pipes. A separate private Unix socket also controls
+every running instance, including the TUI (see below).
+See **[the RPC protocol and client example](docs/rpc.md)** for request/event schemas,
+approval handling, cancellation, and lifecycle details.
+
+### MCP and code mode (experimental)
+
+MCP and code mode are enabled by default, independently toggleable in `/settings`.
+Preferences persist in the session and user defaults. MCP reads only
+`$XDG_CONFIG_HOME/habibi/mcp.json` (default `~/.config/habibi/mcp.json`);
+a missing file is normal. Connections start on the first prompt (not while idle).
+Disabling MCP drops its connections; enabling it reconnects on the next prompt. Settings changed during a run apply afterward.
+
+Open **`/mcp`** while idle to manage individual servers:
+
+- **n** adds a server; **e / Enter** opens a colored form with labeled input boxes.
+  No JSON editing: Habibi generates the configuration from the fields.
+- Set **name**, **transport**, and **enabled** state. **Space / Left / Right** changes
+  a selector; **F2** switches between local stdio and remote Streamable HTTP.
+- Local servers have an **executable**, individual **argument** fields, and pairs
+  of **child environment variable / parent source variable** fields. **F3** adds
+  an argument; **F4** adds an environment mapping; **Ctrl-D** removes the focused
+  argument or mapping. Each argument is passed exactly as entered—no shell quoting
+  or splitting, including arguments containing spaces.
+- Remote servers have a **URL** and optional **bearer-token environment variable**
+  field. Enter the name of a parent environment variable, never a literal secret.
+- **Tab / Up / Down** switches fields; **Left / Right / Home / End** moves the text
+  cursor; **Ctrl-U** clears a field. Backspace, Delete, and paste are supported.
+  The form scrolls to the focused field. Enter accepts the draft; Esc discards it.
+- **Space** enables/disables the selected server (`"disabled": true` persists it).
+- **d** removes the selected server from the draft.
+- **s**, then **Enter** confirms saving the user config and trusting its enabled
+  programs. Esc closes the manager without saving. Existing connections close;
+  enabled servers reconnect on the next prompt.
+
+Changes are validated and saved atomically in a private file. External changes
+since the manager opened are rejected rather than silently overwritten. Use
+`env_from` / `bearer_token_env` references instead of placing secrets in the editor.
+The global `/settings` MCP toggle still controls all servers together. If connection
+fails, `/mcp` remains available to fix or disable the server before retrying.
+
+Installing this user configuration **trusts its programs and remote servers**:
+configured programs start before the next model request without a tool approval
+and are not sandboxed.
+Habibi never auto-loads repository MCP configuration. Example:
+
+```json
+{
+  "mcpServers": {
+    "local": {
+      "command": "/absolute/path/to/mcp-server",
+      "args": ["--stdio"],
+      "env_from": {"API_TOKEN": "MY_SERVER_TOKEN"}
+    },
+    "remote": {
+      "url": "https://example.com/mcp",
+      "bearer_token_env": "MY_REMOTE_TOKEN"
+    }
+  }
+}
+```
+
+Replace these placeholders with your servers. `env_from` maps child variable
+names to parent environment-variable names, not secret values. Stdio children
+receive a minimal environment (PATH, HOME, USER, TMPDIR, TEMP, SYSTEMROOT) plus
+these explicit mappings. Their working directory is the session workspace;
+stderr is discarded to avoid corrupting the TUI. Remote servers use Streamable
+HTTP, require HTTPS except on loopback, and do not follow redirects. Bearer auth
+is optional; OAuth login and legacy HTTP+SSE transport are not implemented.
+
+Tools are discovered on connection and named `mcp__SERVER__TOOL`. Server names use
+1–24 ASCII letters, digits or hyphens; the complete tool identifier must fit
+64 ASCII letters, digits, underscores or hyphens. Invalid/colliding definitions
+fail connection rather than silently aliasing tools. MCP resources, prompts,
+server-initiated sampling/elicitation, and live catalog refresh are not supported.
+Tool errors and structured MCP results are preserved; image blocks are currently
+JSON, not rendered images. Calls time out after 120 seconds; timeout/cancellation
+cannot roll back remote side effects.
+
+Code mode lets the **model** invoke `codemode({"code":"..."})`; it is not a
+JavaScript prompt in the TUI. Scripts run as async function bodies:
+
+```javascript
+const files = ["Cargo.toml", "README.md"];
+for (const path of files) {
+  const content = await tools.read({ path });
+  text({ path, preview: content.slice(0, 500) });
+}
+return "Inspected two files";
+```
+
+- Globals: `tools[name](args)`, `text(value)`, `console.log/info/warn/error`,
+  `searchTools(query)` (simple case-insensitive term matching, up to 20 results),
+  and `describeTool(name)` (description and JSON input schema).
+- Built-ins return text; MCP tools return the full MCP result object, including
+  `content` and `structuredContent`. Failed or denied tool calls reject.
+- Script approval **does not approve its child calls**. Ask/YOLO applies to each
+  child just as to direct tools. Calls and results appear in the TUI/inspector
+  and session audit journal; only explicit script output enters model context.
+- `Promise.all` / `Promise.allSettled` run up to eight tools concurrently, with
+  serialized approval prompts. Writes/edits serialize to avoid lost updates;
+  explicitly await dependent operations. No nested code mode, persistent
+  script store, TypeScript, module imports, Node APIs, filesystem/network APIs,
+  or timers. Use approved tools for external access.
+- Limits: 64 MiB VM memory, 64 KiB source/output, 64 tool calls, 120 seconds
+  including worker/approval waits, and two active workers per process. In-flight
+  local mutations are awaited rather than abandoned when cancellation occurs. Completed
+  side effects remain after script failure; partial output is retained.
+- Tool catalogs are still exposed to the model normally. Deferred exposure and
+  catalog optimization are follow-up work.
+
+**Neither MCP servers nor `tools.bash()` are sandboxed.** The restricted JS VM
+only limits direct script access; tool capabilities remain unchanged. External
+tool registrations are not replayed from journals. Code-mode preferences are
+restored; MCP connections are rebuilt from user configuration on the first prompt after resume. Journals with child-call audit records require this
+version or newer; older binaries cannot read those new records.
+
+Library hosts can use `Session::register_tool`, atomic `register_tools`,
+`tool_definitions`, `enable_codemode`, and `mcp::connect`. Custom tools implement
+`Tool` and receive a workspace and cancellation token. They are trusted host
+code and must honor cancellation, bound output, and finish local mutations
+before returning. Input schemas are validated without network/file `$ref`
+resolution; registering a tool never grants permission to execute it.
 
 ### Ollama and model choices
 
@@ -204,13 +345,14 @@ Library hosts can set `SessionConfig.skill_dirs` and `sticky_skills`; set
 - **Esc:** interrupt the active run, including a pending approval, and clear queued messages. In settings it closes the dialog without saving. Already-completed tool effects are not undone. Errors also clear pending queues rather than automatically continuing.
 - **Ctrl-C:** cancel an active run; quit when idle.
 - **PgUp / PgDn or mouse wheel:** scroll the transcript or open argument inspector. Scrolling up keeps your reading position stable as output arrives; scroll back to the bottom to follow output again. Conversation roles, headings, bold text, inline code, and fenced code blocks have lightweight styling. Tools/results use compact summaries, with full content retained in the session journal. Thinking is shown as a compact activity indicator, never raw private reasoning.
-- **Tab:** complete slash commands; press again to cycle matches. Suggestions appear as you type `/`.
+- **Slash autocomplete:** typing `/` shows up to five matching commands/skills above the prompt, with descriptions. **Up/Down** selects a row; **Tab** accepts it. **Enter** accepts a partial match, then submits the completed command on the next press; exact commands submit immediately. **Esc** hides suggestions while idle (during a run it still cancels). Narrow the prefix to find other commands.
+- **Skills:** `/skill:name [request]` asks the agent to use that discovered skill. Skill names also match short prefixes such as `/rev` → `/skill:review`. Completion reads the session’s discovered metadata, refreshes when skill-directory settings change, and never loads skill bodies or bypasses `load_skill` approval. Skill requests can be steered or queued as follow-ups like ordinary prompts.
 - **Ctrl-U:** clear input. **/help**, **/quit**, **/models**, **/model**, **/settings**, **/compact**, **/inspect**.
 - **Activity animation:** while running, the prompt border shows a bouncing ball with **Thinking**, **Responding**, **Executing tool call: <name>**, or **Compacting context**. It pauses for approvals and stops when idle. The footer keeps safety/cancellation hints without repeating the activity label.
 - **/inspect:** open a read-only context and tool-call inspector, including during execution (see below).
 - **/models:** list bundled subscription choices or discover installed Ollama models.
 - **/model:** choose with Ctrl-N/P or type a model ID in a modal; Ctrl-D restores the bundled provider default. Enter saves a default for future new sessions. Custom IDs are supported; availability depends on your account/server.
-- **/settings:** edit model, maximum model turns per prompt (**0 = unlimited**, the default), context budget in bytes, auto-compaction percentage (default **80%**, **0** disables it), sticky skills, and the skill directory list. Tab/Up/Down selects a field, Ctrl-U clears it, Enter validates and applies, and Esc discards the draft. Model and frontend preferences also become user defaults; other settings remain session-local. `--resume` restores journaled settings; provider and workspace remain fixed. Changes are available only while idle.
+- **/settings:** edit model, maximum model turns per prompt (**0 = unlimited**, the default), context budget in bytes, auto-compaction percentage (default **80%**, **0** disables it), sticky skills, and the skill directory list. Tab/Up/Down selects a field, Ctrl-U clears it, Enter validates and applies, and Esc discards the draft. Model and frontend preferences also become user defaults; other settings remain session-local. `--resume` restores journaled settings; provider and workspace remain fixed. Changes saved during execution apply after the current run.
 - **Status bar:** `/settings` lets you toggle activity, model, RAM, context, and keyboard hints individually using Space or Left/Right. Current-process resident RAM refreshes once a second on Linux (`n/a` elsewhere); child-process memory is not included. Context reports serialized conversation plus skill-context bytes used / configured limit and percentage, **not provider tokens or the actual model context window**. Usage updates as conversation messages are committed, not per streamed token.
 - **Tool permissions:** `/settings` selects **Ask every time** (default) or **YOLO** (auto-approve every tool, including reads, edits, writes, and unsandboxed shell commands). Enabling YOLO requires a second Enter to confirm the warning. The preference is saved with the session and **automatically restored on resume**, without another confirmation. New sessions default to Ask unless you explicitly saved YOLO in `/settings`. YOLO and active approval/cancellation indicators cannot be hidden by status-bar toggles. Only enable it for trusted work; shell commands retain your account’s filesystem/network access.
 
@@ -261,12 +403,28 @@ approval inspector during a run.
 - Direct streaming model requests to the ChatGPT Codex backend, Anthropic Messages endpoint, and native Ollama chat endpoint.
 - OAuth PKCE, callback state checks, refresh-token rotation, and cross-process refresh locking.
 - Built-in workspace tools: `read`, `write`, exact single-match `edit`, and `bash`.
-- Tools run sequentially. File writes use atomic replacement. Reads/writes are limited to 2 MiB; shell output is captured, drained, and bounded to 64 KiB per stream.
+- Direct model tool calls run sequentially; code mode supports bounded parallel calls. File writes use atomic replacement. Reads/writes are limited to 2 MiB; shell output is captured, drained, and bounded to 64 KiB per stream.
 - Cancellation drops HTTP requests and kills shell process groups on Unix, including descendants. Already-completed edits are not undone; in-progress atomic file operations finish before cancellation returns.
 - Private append-only JSONL sessions, exclusive session locks, resume, torn-tail recovery, and interrupted-tool-result repair.
 - Bounded event channels and terminal transcript. Terminal control characters are removed from displayed output.
 
 Runs have no model-turn limit by default. Set a positive maximum in `/settings` to cap turns per prompt; **0** means unlimited. Existing saved sessions retain their configured limit. The default context limit is 1 MiB of serialized transcript, **not a token estimate**. Before a model turn, the agent automatically summarizes at the configured percentage (80% by default). Use **/compact** while idle to manually summarize, including after `habibi --resume SESSION.jsonl`, then submit your next prompt to continue. Compaction uses the selected provider/model with tools disabled and replaces active history with a continuation summary; original records remain in the journal. Settings and summary checkpoints survive resume. Summary generation is lossy and requires working provider access; a failed/cancelled summary leaves history unchanged. The byte budget is not the provider context window: if the provider already rejects the history as too large, summarization may also fail. With auto-compaction off, exceeding the budget stops the run explicitly.
+
+### Transient provider errors
+
+Codex, Claude, and Ollama calls automatically retry connection failures, request timeouts,
+and HTTP 408, 429, 500, 502, 503, 504, and 529 responses up to **five retries after the
+initial attempt** (six attempts total). Backoff is **2, 4, 8, 16, and 32 seconds**.
+A numeric `Retry-After` can increase the delay, capped at 60 seconds; HTTP-date values
+fall back to the normal schedule. Other HTTP errors (including authentication and
+invalid requests) fail immediately.
+
+The same policy covers compaction and explicit Ollama model discovery. The TUI reports
+retries during agent runs and compaction; Esc/Ctrl-C cancels requests and backoff waits.
+Once response headers have been accepted and streaming begins, stream failures and
+provider stream-error events are **not** retried automatically, preventing replay of
+partial output. Retries do not rerun tools or add conversation turns. Exhausted retries
+surface the final request error normally.
 
 ### Subscription caveat
 
@@ -346,10 +504,19 @@ These include process launch; first paint includes local session creation. They 
 
 ## Deliberately absent
 
-Plugins, embedded scripting, MCP, subagents, repository indexing, automatic retries, custom tool registration, API-key providers, and streaming shell output. Add these only when an actual workflow justifies their cost. The public Rust API and journal format are prototype-level and may change.
+Subagents, repository indexing, API-key providers, and streaming shell output. Add these only when an actual workflow justifies their cost. The public Rust API and journal format are prototype-level and may change.
 
 ## CI and releases
 
 GitHub Actions tests and packages all four supported targets, checks Rust 1.89 compatibility, and runs the Linux PTY smoke tests and hermetic installer tests. Stable `v*` tags matching the workspace version trigger a gated release with archives and `SHA256SUMS`. GitHub Pages deploys the static website and canonical installer from `main`. Actions are pinned to commit SHAs and tracked by Dependabot.
 
 See [the release checklist](docs/releasing.md) for publishing, platform limitations, and installer configuration.
+
+### Control a running instance
+
+Every running Habibi instance exposes a private Unix control socket—even the
+TUI and plain `-p` runs. The startup output shows its path. Other local processes
+can send JSON Lines requests to check status, steer, queue follow-ups, answer
+pending approvals, stop, or shut down the instance without taking over its
+terminal. See [Local RPC and socket control](docs/rpc.md) for discovery,
+permissions, protocol examples, and mode-specific behavior.

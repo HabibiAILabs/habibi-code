@@ -105,6 +105,12 @@ pub(crate) fn discover(roots: &[PathBuf]) -> BTreeMap<String, Skill> {
     skills
 }
 impl Skill {
+    pub fn description(&self) -> String {
+        serde_yaml::from_str::<Metadata>(&self.frontmatter)
+            .map(|m| m.description)
+            .unwrap_or_default()
+    }
+
     pub fn load(&self, name: &str) -> Result<String> {
         let text = read(&self.path).context("Cannot read skill")?;
         parse(&text, name)?;

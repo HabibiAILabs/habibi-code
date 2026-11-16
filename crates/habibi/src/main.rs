@@ -1,6 +1,9 @@
+mod control;
 mod defaults;
+mod headless;
 mod inspect;
 mod login;
+mod mcp_ui;
 mod program_status;
 mod tui;
 mod update;
@@ -11,7 +14,7 @@ use libhabibi::{
 };
 use std::{io::IsTerminal, path::PathBuf};
 
-const HELP: &str = "habibi — a native Rust coding agent (experimental)\n\nUsage:\n  habibi [--provider codex|claude|ollama] [--model ID] [--cwd DIR] [--skill-dir DIR] [--no-sticky-skills]\n  habibi [--ollama-url http://127.0.0.1:11434]\n  habibi models [codex|claude|ollama] [--ollama-url URL]\n  habibi --resume SESSION.jsonl\n  habibi login codex|claude\n  habibi logout codex|claude\n\nSubscriptions use direct OAuth/model requests, never provider agent subprocesses.\nAdapters are experimental and not guaranteed provider-approved.\nTools ask by default; /settings offers explicit YOLO auto-approval. Shell commands are NOT sandboxed.\n\nTUI: Enter submit/steer; Alt-Enter follow-up; Ctrl-Enter/Ctrl-J newline; PgUp/PgDn scroll; Esc interrupt; Ctrl-C cancel or quit.\nCommands: /inspect, /compact, /models, /model, /settings, /update, /quit, /help. Subscriptions require login. Ollama requires a running server and an installed tool-capable model.\n";
+const HELP: &str = "habibi — a native Rust coding agent (experimental)\n\nUsage:\n  habibi [--provider codex|claude|ollama] [--model ID] [--cwd DIR] [--skill-dir DIR] [--no-sticky-skills]\n  habibi [--ollama-url http://127.0.0.1:11434]\n  habibi -p \"PROMPT\" [--yolo]\n  habibi --rpc [-p \"PROMPT\"] [--yolo]\n  habibi models [codex|claude|ollama] [--ollama-url URL]\n  habibi --resume SESSION.jsonl\n  habibi login codex|claude\n  habibi logout codex|claude\n\nSubscriptions use direct OAuth/model requests, never provider agent subprocesses.\nAdapters are experimental and not guaranteed provider-approved.\nTools ask by default; /settings offers explicit YOLO auto-approval. Shell commands and MCP servers are NOT sandboxed.\nMCP and code mode are enabled by default; toggle in /settings.\nMCP reads only $XDG_CONFIG_HOME/habibi/mcp.json (or ~/.config/habibi/mcp.json). Configured programs are trusted; no project discovery.\nCode mode nested tools still require approval.\n\nTUI: Enter submit/steer; Alt-Enter follow-up; Ctrl-Enter/Ctrl-J newline; PgUp/PgDn scroll; Esc interrupt; Ctrl-C cancel or quit.\nHeadless: -p runs once; --rpc serves JSON Lines on stdin/stdout. Tools deny by default; --yolo explicitly approves all.\nCommands: /mcp, /inspect, /compact, /models, /model, /settings, /update, /quit, /help. Subscriptions require login. Ollama requires a running server and an installed tool-capable model.\n";
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
@@ -74,8 +77,10 @@ async fn main() -> Result<()> {
     }
     let options = Options::parse(&args)?;
     ensure!(
-        std::io::stdin().is_terminal() && std::io::stdout().is_terminal(),
-        "The TUI requires a terminal. Use libhabibi for headless integration."
+        options.prompt.is_some()
+            || options.rpc
+            || (std::io::stdin().is_terminal() && std::io::stdout().is_terminal()),
+        "The TUI requires a terminal. Use -p PROMPT or --rpc for headless operation."
     );
     let (session, path) = if let Some(path) = options.resume.clone() {
         (Session::resume(&path, auth)?, path)
@@ -94,6 +99,10 @@ async fn main() -> Result<()> {
         session.persist(&path)?;
         (session, path)
     };
+    if options.rpc || options.prompt.is_some() {
+        return headless::run(session, path, options.prompt, options.rpc, options.yolo).await;
+    }
+    // Defer connections until a prompt so /mcp remains usable with broken servers.
     tui::run(session, path).await
 }
 
@@ -158,6 +167,9 @@ fn base_dir(variable: &str, fallback: &str) -> Result<PathBuf> {
 }
 
 struct Options {
+    prompt: Option<String>,
+    rpc: bool,
+    yolo: bool,
     sticky_skills: bool,
     skill_dirs: Vec<PathBuf>,
     provider: Provider,
@@ -190,6 +202,9 @@ impl Options {
     }
     fn parse(args: &[String]) -> Result<Self> {
         let mut options = Self {
+            prompt: None,
+            rpc: false,
+            yolo: false,
             sticky_skills: true,
             skill_dirs: Vec::new(),
             provider: Provider::Codex,
@@ -202,6 +217,14 @@ impl Options {
         let mut changed = false;
         let mut args = args.iter();
         while let Some(flag) = args.next() {
+            if flag == "--rpc" {
+                options.rpc = true;
+                continue;
+            }
+            if flag == "--yolo" {
+                options.yolo = true;
+                continue;
+            }
             if flag == "--sticky-skills" || flag == "--no-sticky-skills" {
                 options.sticky_skills = flag == "--sticky-skills";
                 changed = true;
@@ -209,12 +232,16 @@ impl Options {
             }
             let value = match flag.as_str() {
                 "--provider" | "--model" | "--cwd" | "--resume" | "--skill-dir"
-                | "--ollama-url" => args
+                | "--ollama-url" | "-p" | "--prompt" => args
                     .next()
                     .with_context(|| format!("Missing value for {flag}"))?,
                 _ => bail!("Unknown argument {flag}; use --help"),
             };
             match flag.as_str() {
+                "-p" | "--prompt" => {
+                    ensure!(!value.trim().is_empty(), "Prompt cannot be empty");
+                    options.prompt = Some(value.clone());
+                }
                 "--provider" => {
                     options.provider = value.parse()?;
                     options.provider_explicit = true;
@@ -245,12 +272,71 @@ impl Options {
             options.resume.is_none() || !changed,
             "--resume uses the saved provider, model, and workspace; do not combine overrides"
         );
+        ensure!(
+            !options.yolo || options.rpc || options.prompt.is_some(),
+            "--yolo is for headless/RPC mode; use /settings in the TUI"
+        );
         Ok(options)
     }
 }
 
+async fn connect_mcp(session: &mut Session) -> Result<()> {
+    if !session.config().preferences.mcp_enabled
+        || session
+            .tool_definitions()
+            .iter()
+            .any(|d| d.name.starts_with("mcp__"))
+    {
+        return Ok(());
+    }
+    let path = base_dir("XDG_CONFIG_HOME", ".config")?.join("habibi/mcp.json");
+    let file = match std::fs::File::open(&path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    file.take(1024 * 1024 + 1).read_to_end(&mut bytes)?;
+    ensure!(
+        bytes.len() <= 1024 * 1024,
+        "MCP configuration exceeds 1 MiB"
+    );
+    let config = serde_json::from_slice(&bytes).context("Invalid user MCP configuration")?;
+    libhabibi::mcp::connect(session, config).await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn headless_options_and_resume() {
+        let options = Options::parse(
+            &[
+                "--rpc",
+                "-p",
+                "hello",
+                "--resume",
+                "session.jsonl",
+                "--yolo",
+            ]
+            .map(String::from),
+        )
+        .unwrap();
+        assert!(options.rpc && options.yolo);
+        assert_eq!(options.prompt.as_deref(), Some("hello"));
+        assert!(Options::parse(&["-p".into()]).is_err());
+        assert!(Options::parse(&["-p".into(), " ".into()]).is_err());
+        assert!(Options::parse(&["--yolo".into()]).is_err());
+        assert!(Options::parse(&[]).unwrap().prompt.is_none());
+    }
+
+    #[test]
+    fn extensions_are_settings_not_flags() {
+        assert!(super::Options::parse(&["--codemode".into()]).is_err());
+        assert!(super::Options::parse(&["--mcp-config".into(), "x".into()]).is_err());
+    }
+
     use super::*;
     #[test]
     fn user_defaults_and_explicit_provider_model_endpoint_precedence() {

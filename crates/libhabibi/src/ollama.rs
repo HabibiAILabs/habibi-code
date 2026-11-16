@@ -1,5 +1,7 @@
 //! Native Ollama chat adapter. No OAuth, API-key fallback, model pulls, or implicit discovery.
-use crate::{Event, Message, ToolCall, auth, provider::Completion, session::emit, tools};
+use crate::{
+    Event, Message, ToolCall, auth, provider::Completion, registry::ToolDefinition, session::emit,
+};
 use anyhow::{Context, Result, bail, ensure};
 use futures_util::StreamExt;
 use serde_json::{Value, json};
@@ -35,13 +37,14 @@ impl Client {
 
     /// Explicitly list installed model names. Does not load or download models.
     pub async fn models(&self) -> Result<Vec<String>> {
-        let response = self
-            .http
-            .get(self.base.join("api/tags")?)
-            .timeout(Duration::from_secs(15))
-            .send()
-            .await
-            .context("Could not reach Ollama; start `ollama serve` or check the Ollama URL")?;
+        let response = crate::retry::send(
+            self.http
+                .get(self.base.join("api/tags")?)
+                .timeout(Duration::from_secs(15)),
+            None,
+        )
+        .await
+        .context("Could not reach Ollama; start `ollama serve` or check the Ollama URL")?;
         ensure!(
             response.status().is_success(),
             "Ollama model discovery failed ({})",
@@ -72,15 +75,17 @@ impl Client {
         history: &[Message],
         events: &mpsc::Sender<Event>,
         summary: bool,
+        definitions: &[ToolDefinition],
     ) -> Result<Completion> {
-        let response = self
-            .http
-            .post(self.base.join("api/chat")?)
-            .timeout(Duration::from_secs(300))
-            .json(&request_body(model, system, history, summary))
-            .send()
-            .await
-            .context("Ollama request failed; start `ollama serve` or check the Ollama URL")?;
+        let response = crate::retry::send(
+            self.http
+                .post(self.base.join("api/chat")?)
+                .timeout(Duration::from_secs(300))
+                .json(&request_body(model, system, history, summary, definitions)),
+            Some(events),
+        )
+        .await
+        .context("Ollama request failed; start `ollama serve` or check the Ollama URL")?;
         ensure!(
             response.status().is_success(),
             "Ollama rejected the request ({}). Check that the model is installed and supports tools; Habibi never pulls models automatically.",
@@ -104,7 +109,13 @@ async fn bounded_body(response: reqwest::Response, limit: usize) -> Result<Vec<u
     Ok(bytes)
 }
 
-fn request_body(model: &str, system: &str, history: &[Message], summary: bool) -> Value {
+fn request_body(
+    model: &str,
+    system: &str,
+    history: &[Message],
+    summary: bool,
+    definitions: &[ToolDefinition],
+) -> Value {
     let mut messages = vec![json!({"role":"system","content":system})];
     for message in history {
         match message {
@@ -130,7 +141,7 @@ fn request_body(model: &str, system: &str, history: &[Message], summary: bool) -
     let mut body = json!({"model":model,"messages":messages,"stream":true});
     if !summary {
         body["tools"] = json!(
-            tools::definitions()
+            definitions
                 .iter()
                 .map(|d| json!({"type":"function","function":{
                     "name":d.name,"description":d.description,"parameters":d.schema
@@ -273,6 +284,23 @@ async fn consume(response: reqwest::Response, events: &mpsc::Sender<Event>) -> R
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn dynamic_catalog_is_not_replaced_by_builtins() {
+        let definitions = vec![crate::ToolDefinition {
+            name: "custom".into(),
+            description: "dynamic".into(),
+            schema: serde_json::json!({"type":"object"}),
+        }];
+        let body = super::request_body("test", "system", &[], false, &definitions);
+        assert_eq!(body["tools"].as_array().unwrap().len(), 1);
+        assert_eq!(body["tools"][0]["function"]["name"], "custom");
+        assert!(
+            super::request_body("test", "system", &[], true, &definitions)
+                .get("tools")
+                .is_none()
+        );
+    }
+
     use super::*;
 
     #[test]
@@ -305,7 +333,13 @@ mod tests {
                     is_error: false,
                 },
             ];
-            let body = request_body("test", "system", &history, false);
+            let body = request_body(
+                "test",
+                "system",
+                &history,
+                false,
+                &crate::tools::definitions(),
+            );
             assert_eq!(
                 body["messages"][1]["tool_calls"][0]["function"]["arguments"]["path"],
                 "a"
@@ -313,9 +347,15 @@ mod tests {
             assert_eq!(body["messages"][2]["tool_name"], "read");
             assert_eq!(body["messages"][2]["content"], "found");
             assert!(
-                request_body("test", "system", &history, true)
-                    .get("tools")
-                    .is_none()
+                request_body(
+                    "test",
+                    "system",
+                    &history,
+                    true,
+                    &crate::tools::definitions()
+                )
+                .get("tools")
+                .is_none()
             );
         }
     }

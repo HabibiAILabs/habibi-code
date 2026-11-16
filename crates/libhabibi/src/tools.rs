@@ -1,7 +1,7 @@
 use crate::ToolCall;
 use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::json;
 use std::{
     fs,
     io::Read,
@@ -14,37 +14,33 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 const MAX_FILE: usize = 2 * 1024 * 1024;
 const MAX_OUTPUT: usize = 64 * 1024;
 
-pub(crate) struct Definition {
-    pub name: &'static str,
-    pub description: &'static str,
-    pub schema: Value,
-}
+pub(crate) use crate::registry::ToolDefinition as Definition;
 
 pub(crate) fn definitions() -> Vec<Definition> {
     vec![
         Definition {
-            name: "load_skill",
-            description: "Read a discovered Agent Skill's full SKILL.md by name. Resources are relative to its base directory. Requires approval like other tools.",
+            name: "load_skill".into(),
+            description: "Read a discovered Agent Skill's full SKILL.md by name. Resources are relative to its base directory. Requires approval like other tools.".into(),
             schema: json!({"type":"object","properties":{"name":{"type":"string"}},"required":["name"],"additionalProperties":false}),
         },
         Definition {
-            name: "read",
-            description: "Read a UTF-8 workspace file with line numbers. Maximum file size 2 MiB.",
+            name: "read".into(),
+            description: "Read a UTF-8 workspace file with line numbers. Maximum file size 2 MiB.".into(),
             schema: json!({"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer","minimum":1},"limit":{"type":"integer","minimum":1,"maximum":5000}},"required":["path"],"additionalProperties":false}),
         },
         Definition {
-            name: "write",
-            description: "Atomically create or replace a UTF-8 workspace file. Parent directory must exist. Maximum 2 MiB.",
+            name: "write".into(),
+            description: "Atomically create or replace a UTF-8 workspace file. Parent directory must exist. Maximum 2 MiB.".into(),
             schema: json!({"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"],"additionalProperties":false}),
         },
         Definition {
-            name: "edit",
-            description: "Replace exactly one occurrence of old_text in a workspace file. Fails on missing or ambiguous matches.",
+            name: "edit".into(),
+            description: "Replace exactly one occurrence of old_text in a workspace file. Fails on missing or ambiguous matches.".into(),
             schema: json!({"type":"object","properties":{"path":{"type":"string"},"old_text":{"type":"string"},"new_text":{"type":"string"}},"required":["path","old_text","new_text"],"additionalProperties":false}),
         },
         Definition {
-            name: "bash",
-            description: "Run a shell command in the workspace. Not sandboxed. Timeout 120 seconds; output bounded to 64 KiB per stream.",
+            name: "bash".into(),
+            description: "Run a shell command in the workspace. Not sandboxed. Timeout 120 seconds; output bounded to 64 KiB per stream.".into(),
             schema: json!({"type":"object","properties":{"command":{"type":"string"}},"required":["command"],"additionalProperties":false}),
         },
     ]
