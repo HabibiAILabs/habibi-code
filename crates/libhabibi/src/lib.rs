@@ -2,6 +2,7 @@
 pub mod auth;
 mod codemode;
 pub mod mcp;
+pub mod mcp_oauth;
 pub mod ollama;
 mod provider;
 mod registry;

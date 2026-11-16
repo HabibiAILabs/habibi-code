@@ -20,6 +20,23 @@ pub struct Manager {
     edit: Option<Editor>,
     error: String,
     confirm: bool,
+    auth: Option<AuthDialog>,
+}
+enum AuthEvent {
+    Url(String),
+    Finished(Result<()>),
+}
+struct AuthDialog {
+    task: tokio::task::JoinHandle<()>,
+    events: tokio::sync::mpsc::UnboundedReceiver<AuthEvent>,
+    callback: Option<tokio::sync::oneshot::Sender<String>>,
+    input: Input,
+    url: String,
+}
+impl Drop for AuthDialog {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
 }
 #[derive(Default)]
 struct Input {
@@ -383,12 +400,22 @@ impl Manager {
             edit: None,
             error: String::new(),
             confirm: false,
+            auth: None,
         })
     }
     fn name(&self) -> Option<String> {
         self.servers.keys().nth(self.selected).cloned()
     }
+    pub fn authenticating(&self) -> bool {
+        self.auth.is_some()
+    }
     pub fn paste(&mut self, text: &str) {
+        if let Some(auth) = &mut self.auth {
+            if auth.input.value.len() + text.len() <= 8192 {
+                auth.input.insert(text);
+            }
+            return;
+        }
         self.confirm = false;
         if let Some(edit) = &mut self.edit {
             let field = edit.fields()[edit.selected];
@@ -398,6 +425,25 @@ impl Manager {
         }
     }
     pub fn key(&mut self, key: KeyEvent) -> Action {
+        if let Some(auth) = &mut self.auth {
+            match key.code {
+                KeyCode::Esc => {
+                    self.auth = None;
+                    self.error = "Authentication cancelled; previous credentials preserved".into();
+                }
+                KeyCode::Enter if !auth.input.value.is_empty() => {
+                    if let Some(callback) = auth.callback.take() {
+                        let _ = callback.send(std::mem::take(&mut auth.input.value));
+                    }
+                }
+                _ => {
+                    if auth.input.value.len() < 8192 {
+                        auth.input.key(key);
+                    }
+                }
+            }
+            return Action::None;
+        }
         self.error.clear();
         if let Some(edit) = &mut self.edit {
             match key.code {
@@ -469,9 +515,88 @@ impl Manager {
                 }
             }
             KeyCode::Char('s') => self.confirm = true,
+            KeyCode::Char('a' | 'l') => {
+                if let Err(error) = self.authenticate(key.code == KeyCode::Char('l')) {
+                    self.error = format!("{error:#}");
+                }
+            }
+
             _ => {}
         }
         Action::None
+    }
+    fn authenticate(&mut self, logout: bool) -> Result<()> {
+        let name = self.name().context("Select an HTTP server first")?;
+        let current: libhabibi::mcp::Config = match &self.original {
+            Some(bytes) => serde_json::from_slice(bytes)?,
+            None => anyhow::bail!("Save the configuration before authenticating"),
+        };
+        let saved = current
+            .servers
+            .get(&name)
+            .context("Save the server before authenticating")?;
+        ensure!(
+            serde_json::to_value(saved)? == self.servers[&name],
+            "Save server changes before authenticating"
+        );
+        let libhabibi::mcp::Server::Http(server) = saved else {
+            anyhow::bail!("OAuth is only available for HTTP servers")
+        };
+        ensure!(
+            logout || server.bearer_token_env.is_none(),
+            "Clear the bearer environment field and save before using OAuth"
+        );
+        let store = crate::mcp_auth::store(&server.url)?;
+        let resource = server.url.clone();
+        let (events_tx, events) = tokio::sync::mpsc::unbounded_channel();
+        let (callback, input) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let result = async {
+                if logout {
+                    return store.logout().await;
+                }
+                let login =
+                    libhabibi::mcp_oauth::Login::begin(store, &resource, Default::default())
+                        .await?;
+                let url = login.authorization_url().to_owned();
+                let _ = events_tx.send(AuthEvent::Url(url.clone()));
+                crate::mcp_auth::open_browser(&url);
+                login
+                    .complete(libhabibi::CancellationToken::new(), async {
+                        input.await.context("Login cancelled")
+                    })
+                    .await
+            }
+            .await;
+            let _ = events_tx.send(AuthEvent::Finished(result));
+        });
+        self.auth = Some(AuthDialog {
+            task,
+            events,
+            callback: Some(callback),
+            input: Input::default(),
+            url: String::new(),
+        });
+        Ok(())
+    }
+    /// Poll without blocking the terminal. Successful changes require reconnect.
+    pub fn poll_auth(&mut self) -> (bool, bool) {
+        let mut changed = false;
+        if let Some(auth) = &mut self.auth {
+            while let Ok(event) = auth.events.try_recv() {
+                changed = true;
+                match event {
+                    AuthEvent::Url(url) => auth.url = url,
+                    AuthEvent::Finished(result) => {
+                        let reconnect = result.is_ok();
+                        self.error = match result { Ok(()) => "OAuth credentials updated. Reconnect on the next prompt. Logout only removes local credentials.".into(), Err(error) => format!("{error:#}") };
+                        self.auth = None;
+                        return (true, reconnect);
+                    }
+                }
+            }
+        }
+        (changed, false)
     }
     fn save(&self) -> Result<()> {
         validate(&self.servers)?;
@@ -537,6 +662,32 @@ impl Manager {
         if inner.width == 0 || inner.height == 0 {
             return;
         }
+        if let Some(auth) = &self.auth {
+            let lines = vec![
+                Line::styled(
+                    " MCP OAuth authentication",
+                    Style::default().fg(Color::Cyan),
+                ),
+                Line::raw(""),
+                Line::raw(if auth.url.is_empty() {
+                    "Discovering authorization metadata / updating credentials…"
+                } else {
+                    "Browser opened if available. Otherwise open this link:"
+                }),
+                Line::raw(clean(&auth.url)),
+                Line::raw(""),
+                Line::raw("Waiting for the loopback callback (up to five minutes)."),
+                Line::raw("Remote browser: paste the FULL callback URL, then Enter."),
+                Line::raw(format!(
+                    "Callback input hidden · {} characters",
+                    auth.input.value.chars().count()
+                )),
+                Line::raw("Esc cancels. Credentials are saved only after successful login."),
+                Line::raw("Pre-registered client? Use habibi mcp login SERVER --client-id ID."),
+            ];
+            frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+            return;
+        }
         if self.confirm {
             frame.render_widget(Paragraph::new(vec![
                 Line::styled(" Save and trust this configuration?", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
@@ -564,7 +715,7 @@ impl Manager {
         let hints = if self.edit.is_some() {
             "Tab/↑/↓ focus · ←/→ edit · Ctrl-U clear · F2 transport\nF3 +argument · F4 +env mapping · Ctrl-D remove row\nEnter accept draft · Esc discard edit"
         } else {
-            "↑/↓ select · n add · Enter/e edit · Space toggle · d remove\ns save & apply · Esc discard changes\nChanges are drafts until saved. Reconnect on the next prompt."
+            "↑/↓ select · n add · Enter/e edit · Space toggle · d remove\na Authenticate · l logout · s save & apply · Esc discard changes\nChanges are drafts until saved. Reconnect on the next prompt."
         };
         let mut lines: Vec<Line> = hints
             .lines()
@@ -574,7 +725,7 @@ impl Manager {
             lines.insert(
                 0,
                 Line::styled(
-                    format!("Error: {}", clean(&self.error)),
+                    clean(&self.error),
                     Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
                 ),
             );
@@ -623,6 +774,24 @@ impl Manager {
                     base.fg(Color::Magenta),
                 ),
                 Span::styled(
+                    if http {
+                        if value["bearer_token_env"].is_string() {
+                            "[bearer env] ".into()
+                        } else {
+                            match crate::mcp_auth::store(value["url"].as_str().unwrap_or(""))
+                                .and_then(|s| s.has_credentials())
+                            {
+                                Ok(true) => "[OAuth saved] ".into(),
+                                Ok(false) => "[no OAuth] ".into(),
+                                Err(_) => "[OAuth storage error] ".into(),
+                            }
+                        }
+                    } else {
+                        String::new()
+                    },
+                    base.fg(Color::Yellow),
+                ),
+                Span::styled(
                     clean(
                         value[if http { "url" } else { "command" }]
                             .as_str()
@@ -666,7 +835,7 @@ fn field_label(field: Field) -> (String, &'static str) {
         ),
         Field::Token => (
             "Bearer token · parent environment variable (optional)".into(),
-            "e.g. MY_REMOTE_TOKEN — leave blank for no authentication",
+            "Leave blank to use saved OAuth (list: a Authenticate), or no authentication",
         ),
     }
 }
@@ -774,6 +943,79 @@ fn draw_editor(frame: &mut Frame, area: Rect, edit: &Editor) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn auth_dialog_hides_callback_supports_cancel_and_reports_completion() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let dir = tempfile::tempdir().unwrap();
+        let mut manager = Manager::load(dir.path().join("mcp.json")).unwrap();
+        let (tx, events) = tokio::sync::mpsc::unbounded_channel();
+        let (callback, input) = tokio::sync::oneshot::channel();
+        manager.auth = Some(AuthDialog {
+            task: tokio::spawn(std::future::pending()),
+            events,
+            callback: Some(callback),
+            input: Input::default(),
+            url: "https://example.com/authorize".into(),
+        });
+        manager.paste("http://127.0.0.1/callback?code=SECRET&state=STATE");
+        let mut terminal = Terminal::new(TestBackend::new(100, 32)).unwrap();
+        terminal.draw(|f| manager.draw(f)).unwrap();
+        let content: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(content.contains("https://example.com/authorize"));
+        assert!(!content.contains("SECRET"));
+        manager.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(input.await.unwrap().contains("SECRET"));
+        tx.send(AuthEvent::Finished(Ok(()))).unwrap();
+        assert_eq!(manager.poll_auth(), (true, true));
+        assert!(!manager.authenticating());
+        let (_tx, events) = tokio::sync::mpsc::unbounded_channel();
+        let task = tokio::spawn(std::future::pending());
+        let abort = task.abort_handle();
+        manager.auth = Some(AuthDialog {
+            task,
+            events,
+            callback: None,
+            input: Input::default(),
+            url: String::new(),
+        });
+        manager.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        tokio::task::yield_now().await;
+        assert!(abort.is_finished());
+        assert!(!manager.authenticating());
+    }
+
+    #[test]
+    fn authentication_rejects_drafts_stdio_and_bearer_configuration() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcp.json");
+        let mut manager = Manager::load(path.clone()).unwrap();
+        manager
+            .servers
+            .insert("remote".into(), json!({"url":"https://example.com/mcp"}));
+        assert!(
+            manager
+                .authenticate(false)
+                .unwrap_err()
+                .to_string()
+                .contains("Save")
+        );
+        for value in [
+            json!({"command":"server"}),
+            json!({"url":"https://example.com/mcp", "bearer_token_env":"TOKEN"}),
+        ] {
+            manager.servers.insert("remote".into(), value);
+            manager.save().unwrap();
+            manager = Manager::load(path.clone()).unwrap();
+            assert!(manager.authenticate(false).is_err());
+        }
+    }
+
     #[test]
     fn roundtrip_disable_remove_and_conflict() {
         let dir = tempfile::tempdir().unwrap();

@@ -22,15 +22,25 @@ impl Drop for PrivateInput {
 /// Never echo the callback or read it through ordinary line-buffered terminal input.
 /// Dropping this future (local callback, timeout, or cancellation) restores the terminal.
 pub async fn read_callback() -> Result<String> {
+    read_callback_prompt(
+        "Remote browser? Paste the full callback URL (or code#state), then Enter. Input hidden: ",
+    )
+    .await
+}
+
+pub async fn read_mcp_callback() -> Result<String> {
+    read_callback_prompt("Remote browser? Paste the full callback URL, then Enter. Input hidden: ")
+        .await
+}
+
+async fn read_callback_prompt(prompt: &str) -> Result<String> {
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         return std::future::pending().await;
     }
     enable_raw_mode()?;
     let _private = PrivateInput;
     execute!(io::stdout(), EnableBracketedPaste)?;
-    eprint!(
-        "Remote browser? Paste the full callback URL (or code#state), then Enter. Input hidden: "
-    );
+    eprint!("{prompt}");
     io::stderr().flush()?;
     let mut events = EventStream::new();
     let mut input = String::new();

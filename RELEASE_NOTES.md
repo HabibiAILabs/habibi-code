@@ -1,3 +1,33 @@
+# Habibi v0.4.1
+
+MCP OAuth from the terminal UI and CLI.
+
+## What's new
+
+- **Authenticate from `/mcp`:** select a saved HTTP server and press **a**. Browser authorization runs without blocking the terminal; the dialog shows a fallback link and accepts a privately pasted full callback URL. Esc or Ctrl-C cancels. Press **l** to remove local credentials. The server list shows saved OAuth versus explicit bearer authentication.
+- **CLI authentication:** `habibi mcp login|status|logout SERVER`, with login options `--client-id`, repeatable `--scope`, and `--callback-port` for pre-registered public clients.
+- **Automatic refresh:** Streamable HTTP connections use endpoint-bound saved OAuth when no bearer environment variable is configured. Expired tokens refresh through the MCP SDK, with cross-process locking and atomic private credential storage.
+- **Protocol protections:** discovery, S256 PKCE, callback state/origin/duplicate-parameter checks, issuer binding on every credential read, and bounded callback input. Provider response bodies are not exposed through OAuth/transport error messages.
+- **Library opt-in:** `mcp_oauth::{Store, Login, LoginOptions}` and `mcp::connect_with_oauth_store`; existing callers of `mcp::connect` keep their previous behavior.
+
+## Compatibility and limits
+
+Existing server configuration and journals remain compatible. Explicit bearer-env configuration takes precedence. OAuth requires published metadata with an issuer and a public client (dynamic registration or a supplied client ID); confidential clients and legacy HTTP+SSE are not supported. Login never starts automatically from a model/tool request. Credentials live in private files, not an encrypted keychain. Logout deletes local credentials, not provider grants, and cannot recall in-flight requests. macOS binaries remain unsigned and not notarized.
+
+## Validation
+
+Hermetic tests exercise discovery, dynamic/public registration, PKCE token exchange, loopback callbacks, automatic refresh during MCP initialization, issuer changes, endpoint isolation, logout, cancellation/denial, file permissions, lock contention, and hidden UI input. Full workspace tests, Clippy, Rust 1.89 compatibility, installer checks, and terminal smoke tests run before release. Live third-party OAuth accounts have not been tested.
+
+## Install or upgrade
+
+```sh
+curl -fsSL https://habibiailabs.github.io/habibi-code/install.sh | sh
+```
+
+Restart Habibi, open `/mcp`, select a saved HTTP server with no bearer environment field, and press **a**.
+
+---
+
 # Habibi v0.4.0
 
 Local agent control, headless workflows, MCP, and embedded code mode.
