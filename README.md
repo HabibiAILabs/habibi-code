@@ -2,9 +2,13 @@
 
 A small, native Rust coding-agent prototype: **`libhabibi` owns the agent loop; `habibi` is its full-screen terminal frontend.** No external JavaScript runtime, Habibi daemon, or provider-agent subprocess (Ollama runs as a separate server). Optional code mode embeds QuickJS; explicitly configured MCP servers may run as child processes. Without MCP connections, a best-effort background GitHub release check is the only idle network activity; it never contacts model providers.
 
-## What's new in v0.4.1
+## What's new in v0.5.0
 
 [Release notes](RELEASE_NOTES.md) · [Quick-start website](https://habibiailabs.github.io/habibi-code/)
+
+- **Prompt editing:** Ctrl-C clears a nonempty draft first. Up/Down recalls editable prompts and restores your unfinished draft. Terminal-style line/word navigation and deletion shortcuts are supported. Mouse scrolling stays enabled; use terminal-native Shift-drag to select text.
+
+### Included from v0.4.1
 
 - **MCP OAuth:** select a saved HTTP server in `/mcp` and press **a** to authenticate in your browser, or use `habibi mcp login SERVER`. Private endpoint-bound credentials refresh automatically; **l** removes local OAuth credentials.
 
@@ -395,7 +399,10 @@ Library hosts can set `SessionConfig.skill_dirs` and `sticky_skills`; set
 - **Ctrl+Enter:** insert a newline. **Ctrl-J** is an alternate newline binding. Ctrl+Enter requires a terminal supporting enhanced keyboard reporting; on older terminals that send it as plain Enter, use Ctrl-J or paste multiline text. Input wraps, grows up to six visible rows, and scrolls to the cursor; Left/Right, Home/End, Delete, and Backspace edit the draft. Multiline paste preserves line breaks.
 - **Ctrl-Y / Ctrl-N:** approve one proposed tool call or deny it. In the default Ask mode, every tool requires approval, including reads. **F2** opens the scrollable argument inspector, where **y/n** also approve/deny. Plain y/n in the composer is ordinary text, so drafting a message cannot accidentally approve a tool.
 - **Esc:** interrupt the active run, including a pending approval, and clear queued messages. In settings it closes the dialog without saving. Already-completed tool effects are not undone. Errors also clear pending queues rather than automatically continuing.
-- **Ctrl-C:** cancel an active run; quit when idle.
+- **Ctrl-C:** clear a nonempty prompt first (without cancelling the run); with an empty prompt, cancel an active run or quit when idle. Esc still interrupts immediately.
+- **Prompt history:** Up/Down or Ctrl-P/N recalls the last 100 submitted prompts, including commands and queued messages; Down past the newest restores your unfinished draft and cursor. Recalled text is editable; history entries are unchanged. Available user messages seed history when resuming. Up/Down selects autocomplete when it is open; Esc dismisses completion when idle. Ctrl-N still denies a pending tool approval.
+- **Cursor/editing:** Left/Right or Ctrl-B/F moves one character; Ctrl/Alt-Left/Right or Alt-B/F moves by whitespace-delimited words. Home/End or Ctrl-A/E moves to the current line's start/end. Ctrl-W or Ctrl/Alt-Backspace deletes the previous word; Alt-D or Ctrl/Alt-Delete deletes the next word. Ctrl-D deletes a character (never exits), Ctrl-H backspaces, Ctrl-K deletes to line end (or the newline at line end), and Ctrl-U clears the whole draft.
+- **Select/copy:** mouse scrolling is always enabled. Use your terminal's mouse-selection override (commonly **Shift-drag**), then its copy shortcut (usually **Ctrl-Shift-C** on Linux or **Cmd-C** on macOS). Ctrl-C is not copy. Selection is terminal-owned and covers rendered text; modifier behavior varies by terminal.
 - **PgUp / PgDn or mouse wheel:** scroll the transcript or open argument inspector. Scrolling up keeps your reading position stable as output arrives; scroll back to the bottom to follow output again. Conversation roles, headings, bold text, inline code, and fenced code blocks have lightweight styling. Tools/results use compact summaries, with full content retained in the session journal. Thinking is shown as a compact activity indicator, never raw private reasoning.
 - **Slash autocomplete:** typing `/` shows up to five matching commands/skills above the prompt, with descriptions. **Up/Down** selects a row; **Tab** accepts it. **Enter** accepts a partial match, then submits the completed command on the next press; exact commands submit immediately. **Esc** hides suggestions while idle (during a run it still cancels). Narrow the prefix to find other commands.
 - **Skills:** `/skill:name [request]` asks the agent to use that discovered skill. Skill names also match short prefixes such as `/rev` → `/skill:review`. Completion reads the session’s discovered metadata, refreshes when skill-directory settings change, and never loads skill bodies or bypasses `load_skill` approval. Skill requests can be steered or queued as follow-ups like ordinary prompts.

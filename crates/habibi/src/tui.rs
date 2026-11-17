@@ -497,6 +497,9 @@ struct View {
     activity: Activity,
     animation_frame: u8,
     input_cursor: usize,
+    prompt_history: Vec<String>,
+    history_index: Option<usize>,
+    history_draft: (String, usize),
     details: Option<String>,
     details_scroll: u16,
     transcript_width: u16,
@@ -599,6 +602,145 @@ impl View {
             self.input_cursor = i;
         }
     }
+    fn clear_draft(&mut self) -> bool {
+        if self.input.is_empty() {
+            return false;
+        }
+        self.input.clear();
+        self.input_cursor = 0;
+        self.history_index = None;
+        self.history_draft = (String::new(), 0);
+        self.reset_completion();
+        true
+    }
+    fn remember_prompt(&mut self, prompt: &str) {
+        if !prompt.trim().is_empty() && self.prompt_history.last().is_none_or(|last| last != prompt)
+        {
+            self.prompt_history.push(prompt.to_owned());
+            if self.prompt_history.len() > 100 {
+                self.prompt_history.remove(0);
+            }
+        }
+        self.history_index = None;
+        self.history_draft = (String::new(), 0);
+    }
+    fn recall_prompt(&mut self, older: bool) {
+        if self.prompt_history.is_empty() {
+            return;
+        }
+        let index = match (self.history_index, older) {
+            (None, false) => return,
+            (None, true) => {
+                self.history_draft = (self.input.clone(), self.input_cursor);
+                self.prompt_history.len() - 1
+            }
+            (Some(index), true) => index.saturating_sub(1),
+            (Some(index), false) => index + 1,
+        };
+        if index == self.prompt_history.len() {
+            (self.input, self.input_cursor) = self.history_draft.clone();
+            self.history_index = None;
+        } else {
+            self.input = self.prompt_history[index].clone();
+            self.input_cursor = self.input.len();
+            self.history_index = Some(index);
+        }
+        self.reset_completion();
+        // Recalled slash commands must remain browsable with Up/Down.
+        self.completion_dismissed = true;
+    }
+    fn word_left(&self) -> usize {
+        let prefix = &self.input[..self.input_cursor];
+        let trimmed = prefix.trim_end_matches(char::is_whitespace);
+        trimmed
+            .char_indices()
+            .rev()
+            .find(|(_, c)| c.is_whitespace())
+            .map_or(0, |(i, c)| i + c.len_utf8())
+    }
+    fn word_right(&self) -> usize {
+        let suffix = &self.input[self.input_cursor..];
+        let trimmed = suffix.trim_start_matches(char::is_whitespace);
+        self.input_cursor + suffix.len() - trimmed.len()
+            + trimmed.find(char::is_whitespace).unwrap_or(trimmed.len())
+    }
+    fn editor_key(&mut self, key: KeyEvent) -> bool {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        match key.code {
+            KeyCode::Up | KeyCode::Char('p') if key.code == KeyCode::Up || ctrl => {
+                self.recall_prompt(true)
+            }
+            KeyCode::Down | KeyCode::Char('n') if key.code == KeyCode::Down || ctrl => {
+                self.recall_prompt(false)
+            }
+            KeyCode::Left if ctrl || alt => self.input_cursor = self.word_left(),
+            KeyCode::Right if ctrl || alt => self.input_cursor = self.word_right(),
+            KeyCode::Char('b') if alt => self.input_cursor = self.word_left(),
+            KeyCode::Char('f') if alt => self.input_cursor = self.word_right(),
+            KeyCode::Left | KeyCode::Char('b') if key.code == KeyCode::Left || ctrl => {
+                if let Some((i, _)) = self.input[..self.input_cursor].char_indices().next_back() {
+                    self.input_cursor = i;
+                }
+            }
+            KeyCode::Right | KeyCode::Char('f') if key.code == KeyCode::Right || ctrl => {
+                if let Some(c) = self.input[self.input_cursor..].chars().next() {
+                    self.input_cursor += c.len_utf8();
+                }
+            }
+            KeyCode::Home | KeyCode::Char('a') if key.code == KeyCode::Home || ctrl => {
+                self.input_cursor = self.input[..self.input_cursor]
+                    .rfind('\n')
+                    .map_or(0, |i| i + 1);
+            }
+            KeyCode::End | KeyCode::Char('e') if key.code == KeyCode::End || ctrl => {
+                self.input_cursor += self.input[self.input_cursor..]
+                    .find('\n')
+                    .unwrap_or(self.input.len() - self.input_cursor);
+            }
+            KeyCode::Backspace if ctrl || alt => {
+                let start = self.word_left();
+                self.input.drain(start..self.input_cursor);
+                self.input_cursor = start;
+            }
+            KeyCode::Char('w') if ctrl => {
+                let start = self.word_left();
+                self.input.drain(start..self.input_cursor);
+                self.input_cursor = start;
+            }
+            KeyCode::Delete if ctrl || alt => {
+                self.input.drain(self.input_cursor..self.word_right());
+            }
+            KeyCode::Char('d') if alt => {
+                self.input.drain(self.input_cursor..self.word_right());
+            }
+            KeyCode::Backspace | KeyCode::Char('h') if key.code == KeyCode::Backspace || ctrl => {
+                self.backspace()
+            }
+            KeyCode::Delete | KeyCode::Char('d') if key.code == KeyCode::Delete || ctrl => {
+                if let Some(c) = self.input[self.input_cursor..].chars().next() {
+                    self.input
+                        .drain(self.input_cursor..self.input_cursor + c.len_utf8());
+                }
+            }
+            KeyCode::Char('k') if ctrl => {
+                let end = self.input[self.input_cursor..]
+                    .find('\n')
+                    .map_or(self.input.len(), |i| self.input_cursor + i);
+                let end = if end == self.input_cursor && end < self.input.len() {
+                    end + 1
+                } else {
+                    end
+                };
+                self.input.drain(self.input_cursor..end);
+            }
+            KeyCode::Char('u') if ctrl => {
+                self.clear_draft();
+            }
+            _ => return false,
+        }
+        true
+    }
     fn enqueue(&mut self, followup: bool, sender: Option<&mpsc::Sender<String>>) -> bool {
         let prompt = self.input.clone();
         let queued = if followup {
@@ -615,6 +757,7 @@ impl View {
             if !followup {
                 self.steering_count += 1;
             }
+            self.remember_prompt(&self.input.clone());
             self.input.clear();
             self.input_cursor = 0;
         }
@@ -916,6 +1059,9 @@ pub async fn run(session: Session, path: PathBuf) -> Result<()> {
         activity: Activity::default(),
         animation_frame: 0,
         input_cursor: 0,
+        prompt_history: Vec::new(),
+        history_index: None,
+        history_draft: (String::new(), 0),
         details: None,
         details_scroll: 0,
         transcript_width: 80,
@@ -943,7 +1089,10 @@ pub async fn run(session: Session, path: PathBuf) -> Result<()> {
     }
     for message in session.messages() {
         match message {
-            Message::User { text } => view.message(&format!("You\n{text}")),
+            Message::User { text } => {
+                view.remember_prompt(text);
+                view.message(&format!("You\n{text}"));
+            }
             Message::Assistant {
                 text, tool_calls, ..
             } => {
@@ -1143,6 +1292,7 @@ pub async fn run(session: Session, path: PathBuf) -> Result<()> {
                                     continue;
                                 }
 
+                                if view.dialog.is_none() && view.mcp_manager.is_none() && view.clear_draft() { continue; }
                                 if let Some(cancel)=&cancellation {cancel.cancel();interrupted=true;program_status.report(crate::program_status::Status::Idle);view.followups.clear();view.pending=None;view.details=None;view.status="Cancelling…".into();}else{break}
                                 continue
                             }
@@ -1214,13 +1364,7 @@ pub async fn run(session: Session, path: PathBuf) -> Result<()> {
                                     view.details=None;view.status="Thinking…".into();
                                 }
                                 _ if view.details.is_some()=>{},
-                                KeyCode::Backspace=>view.backspace(),
-                                KeyCode::Delete=>{if let Some(c)=view.input[view.input_cursor..].chars().next(){view.input.drain(view.input_cursor..view.input_cursor+c.len_utf8());}},
-                                KeyCode::Left=>{if let Some((i,_))=view.input[..view.input_cursor].char_indices().next_back(){view.input_cursor=i;}},
-                                KeyCode::Right=>{if let Some(c)=view.input[view.input_cursor..].chars().next(){view.input_cursor+=c.len_utf8();}},
-                                KeyCode::Home=>view.input_cursor=0,
-                                KeyCode::End=>view.input_cursor=view.input.len(),
-                                KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL)=>{view.input.clear();view.input_cursor=0;},
+                                _ if view.editor_key(key)=>{},
                                 KeyCode::Enter if key.modifiers.contains(KeyModifiers::CONTROL)=>view.insert("\n"),
                                 KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL)=>view.insert("\n"),
                                 KeyCode::Char(c) if !c.is_control() && !key.modifiers.intersects(KeyModifiers::CONTROL|KeyModifiers::ALT)=>view.insert(&c.to_string()),
@@ -1234,6 +1378,7 @@ pub async fn run(session: Session, path: PathBuf) -> Result<()> {
                                 }
                                 KeyCode::Enter=>{
                                     let prompt=std::mem::take(&mut view.input);view.input_cursor=0;
+                                    view.remember_prompt(&prompt);
                                     match prompt.trim() {
                                         ""=>{},
                                         "/quit"|"/exit" if job.is_none()=>break,
@@ -1270,7 +1415,7 @@ pub async fn run(session: Session, path: PathBuf) -> Result<()> {
                                                 view.message(&format!("Bundled {provider} subscription models (account availability varies):\n{}\n/model: Ctrl-N/P selects a model, or type any model ID; Enter saves it.", provider.models().join("\n")));
                                             }
                                         }
-                                        "/help"=>view.message("/mcp: add/configure/disable/remove MCP servers · /inspect: context and tool-call inspector · /compact: summarize context · /models: list models · /model: choose or edit model ID · /settings: model, limits, status bar, tool permissions · /update: upgrade instructions · /quit: exit\nEnter: submit/steer · Alt-Enter: follow-up · Ctrl-Enter/Ctrl-J: newline\n↑/↓: select suggestion · Tab: complete command or skill · /skill:name [request]: invoke a skill · PgUp/PgDn or mouse wheel: scroll · Ctrl-U: clear input · F2: inspect approval\nCommands work during execution; settings apply after the run. /compact and /quit require idle. Esc/Ctrl-C cancels; completed edits are not undone.\nAsk mode: Ctrl-Y allows once, Ctrl-N denies (or y/n in F2 inspector). YOLO auto-approves all tools. Neither mode is a sandbox.\nLogin: subscriptions use habibi login codex|claude outside the TUI. Ollama needs no login.\nResume: habibi --resume <session path shown above>."),
+                                        "/help"=>view.message("/mcp: add/configure/disable/remove MCP servers · /inspect: context and tool-call inspector · /compact: summarize context · /models: list models · /model: choose or edit model ID · /settings: model, limits, status bar, tool permissions · /update: upgrade instructions · /quit: exit\nEnter: submit/steer · Alt-Enter: follow-up · Ctrl-Enter/Ctrl-J: newline\n↑/↓: select suggestion · Tab: complete command or skill · /skill:name [request]: invoke a skill · PgUp/PgDn or mouse wheel: scroll · Shift-drag: terminal selection · Ctrl-U: clear input · Ctrl-A/E: line start/end · Alt-B/F: word left/right · Ctrl-W: delete word · Ctrl-K: delete to line end · Up/Down: prompt history (when completion is closed) · F2: inspect approval\nCommands work during execution; settings apply after the run. /compact and /quit require idle. Ctrl-C clears a nonempty prompt first; otherwise cancels or quits. Esc cancels; completed edits are not undone.\nAsk mode: Ctrl-Y allows once, Ctrl-N denies (or y/n in F2 inspector). YOLO auto-approves all tools. Neither mode is a sandbox.\nLogin: subscriptions use habibi login codex|claude outside the TUI. Ollama needs no login.\nResume: habibi --resume <session path shown above>."),
                                         command if command.starts_with('/') => view.message("Unknown command. Available: /mcp, /inspect, /compact, /models, /model, /settings, /update, /help, /quit, /exit."),
                                         _=>{
                                             view.scroll=0;view.message(&format!("You\n{prompt}"));
@@ -1906,6 +2051,71 @@ mod tests {
         assert!(view.busy);
     }
 
+    #[test]
+    fn prompt_history_restores_draft_and_does_not_mutate_entries() {
+        let mut view = test_view();
+        view.remember_prompt("first\nmessage");
+        view.remember_prompt("/help");
+        view.remember_prompt("/help");
+        view.insert("draft 🦀");
+        view.input_cursor = 5;
+        view.recall_prompt(true);
+        assert_eq!(view.input, "/help");
+        assert!(view.suggestions().is_empty());
+        view.insert(" edited");
+        view.recall_prompt(true);
+        assert_eq!(view.input, "first\nmessage");
+        view.recall_prompt(true);
+        assert_eq!(view.input, "first\nmessage");
+        view.recall_prompt(false);
+        assert_eq!(view.input, "/help");
+        view.recall_prompt(false);
+        assert_eq!((&*view.input, view.input_cursor), ("draft 🦀", 5));
+        view.recall_prompt(false);
+        assert_eq!(view.input, "draft 🦀");
+        assert!(view.clear_draft());
+        assert!(!view.clear_draft());
+        assert_eq!(view.input_cursor, 0);
+        for i in 0..120 {
+            view.remember_prompt(&i.to_string());
+        }
+        assert_eq!(view.prompt_history.len(), 100);
+    }
+
+    #[test]
+    fn terminal_editing_is_unicode_safe_and_line_aware() {
+        let mut view = test_view();
+        let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+        let alt = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT);
+        view.insert("héllo 世界\nnext 🦀");
+        view.editor_key(ctrl('a'));
+        assert_eq!(view.input_cursor, "héllo 世界\n".len());
+        view.editor_key(ctrl('e'));
+        assert_eq!(view.input_cursor, view.input.len());
+        view.editor_key(alt('b'));
+        assert_eq!(&view.input[view.input_cursor..], "🦀");
+        view.editor_key(ctrl('d'));
+        assert_eq!(view.input, "héllo 世界\nnext ");
+        view.editor_key(ctrl('w'));
+        assert_eq!(view.input, "héllo 世界\n");
+        view.editor_key(ctrl('b'));
+        view.editor_key(ctrl('k'));
+        assert_eq!(view.input, "héllo 世界");
+        view.editor_key(alt('b'));
+        view.editor_key(alt('f'));
+        assert_eq!(view.input_cursor, view.input.len());
+        view.editor_key(ctrl('h'));
+        assert_eq!(view.input, "héllo 世");
+        view.editor_key(ctrl('a'));
+        view.editor_key(alt('d'));
+        assert_eq!(view.input, " 世");
+        view.editor_key(ctrl('f'));
+        view.editor_key(ctrl('k'));
+        assert_eq!(view.input, " ");
+        view.editor_key(ctrl('u'));
+        assert!(view.input.is_empty());
+    }
+
     fn test_view() -> View {
         View {
             lines: VecDeque::new(),
@@ -1932,6 +2142,9 @@ mod tests {
             activity: Activity::default(),
             animation_frame: 0,
             input_cursor: 0,
+            prompt_history: Vec::new(),
+            history_index: None,
+            history_draft: (String::new(), 0),
             details: None,
             details_scroll: 0,
             transcript_width: 80,

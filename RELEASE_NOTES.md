@@ -1,3 +1,24 @@
+# Habibi v0.5.0
+
+A more terminal-like prompt editor.
+
+- **Safer Ctrl-C:** clears a nonempty draft first, without quitting or interrupting the agent. With an empty prompt it cancels an active run or quits when idle. Esc still interrupts immediately.
+- **Editable prompt history:** Up/Down or Ctrl-P/N browses up to 100 submitted prompts, including queued messages and commands. Down past the newest restores the unfinished draft and cursor. Available user messages seed history on resume. Autocomplete retains Up/Down priority while open; Ctrl-N retains approval-denial priority.
+- **Terminal editing:** Ctrl-A/E or Home/End for line boundaries; Ctrl-B/F for characters; Alt-B/F or Ctrl/Alt-arrow keys for words; Ctrl-W and Alt-D for word deletion; Ctrl-K for deleting to line end; Ctrl-D/H for delete/backspace. Ctrl-U still clears the whole draft. Unicode character boundaries are preserved.
+- **Select and copy:** mouse scrolling remains enabled, with no `/mouse` command. Use your terminal's selection override (commonly Shift-drag), then its copy shortcut. Ctrl-C is not copy. Selection remains terminal-owned, not a whole-session export.
+
+Existing configuration and session journals remain compatible. No new global history file is written. Terminal modifier support varies. macOS binaries remain unsigned and not notarized.
+
+## Install or upgrade
+
+```sh
+curl -fsSL https://habibiailabs.github.io/habibi-code/install.sh | sh
+```
+
+Restart Habibi after upgrading.
+
+---
+
 # Habibi v0.4.1
 
 MCP OAuth from the terminal UI and CLI.

@@ -72,6 +72,11 @@ def launch(args, env, workspace):
                 assert process.poll() is None, "TUI exited during modal interaction"
             output.extend(received)
 
+        assert b"\x1b[?1000h" in output, "mouse scrolling not enabled"
+        send_and_wait(b"discard-this-draft", b"discard-this-draft")
+        # Ctrl-C clears the composer, rather than quitting; the next command works.
+        os.write(master, b"\x03")
+        time.sleep(0.1)
         send_and_wait(b"/inspect\r", b"Budget")
         send_and_wait(b"\t", b"latest")
         send_and_wait(b"a", b"All session tool calls")
@@ -94,8 +99,13 @@ def launch(args, env, workspace):
         os.write(master, b"\x15")
         send_and_wait(b"\x1b[200~pasted-first\npasted-second\x1b[201~", b"second")
         os.write(master, b"\x15")
-        os.write(master, b"/help\r")
-        time.sleep(0.05)
+        send_and_wait(b"/help\r", b"Ctrl-U")
+        send_and_wait(b"history-draft", b"history-draft")
+        # Ctrl-P/N use the same history path as Up/Down, without completion.
+        send_and_wait(b"\x10", b"/help")
+        send_and_wait(b"\x0e", b"history-draft")
+        os.write(master, b"\x03")
+        time.sleep(0.1)
         os.write(master, b"\x03")
         # Drain during shutdown so terminal output cannot fill the PTY and block exit.
         deadline = time.monotonic() + 5
