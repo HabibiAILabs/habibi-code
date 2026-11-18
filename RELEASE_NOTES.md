@@ -1,7 +1,8 @@
 # Habibi v0.5.0
 
-A more terminal-like prompt editor.
+A more terminal-like prompt editor and a folder-scoped session browser.
 
+- **Session picker:** `/resume` opens a searchable, newest-first list for the current folder, with original first-user/latest-message previews. Arrow keys or wheel select, Enter resumes, Esc closes. Narrow terminals stack the panes. Browsing is read-only; locked/invalid sessions leave the current session intact. Saved model and permissions are restored, and local control clients must rediscover the new socket. Preview/file-count limits are documented in the README.
 - **Safer Ctrl-C:** clears a nonempty draft first, without quitting or interrupting the agent. With an empty prompt it cancels an active run or quits when idle. Esc still interrupts immediately.
 - **Editable prompt history:** Up/Down or Ctrl-P/N browses up to 100 submitted prompts, including queued messages and commands. Down past the newest restores the unfinished draft and cursor. Available user messages seed history on resume. Autocomplete retains Up/Down priority while open; Ctrl-N retains approval-denial priority.
 - **Terminal editing:** Ctrl-A/E or Home/End for line boundaries; Ctrl-B/F for characters; Alt-B/F or Ctrl/Alt-arrow keys for words; Ctrl-W and Alt-D for word deletion; Ctrl-K for deleting to line end; Ctrl-D/H for delete/backspace. Ctrl-U still clears the whole draft. Unicode character boundaries are preserved.

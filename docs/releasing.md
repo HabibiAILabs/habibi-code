@@ -38,3 +38,13 @@ curl -fsSL https://habibiailabs.github.io/habibi-code/install.sh | \
 ```
 
 For review-first installation, download the script to a file, inspect it, then execute it. The installer resolves the latest tag once and pins both the archive and checksum downloads to that tag. A checksum failure leaves an existing installation untouched. No automatic self-update, privilege escalation, shell-profile edits, or telemetry is performed.
+
+## Hosted-runner capacity failures
+
+A job with no steps and “The job was not acquired by Runner of type hosted” is
+a runner-capacity failure, not a compiler/test failure. Check the job annotations;
+retry failed jobs with `gh run rerun RUN_ID --failed` once capacity is available.
+Do not bypass platform checks or publish partial assets. The original v0.5.0
+attempt hit this failure on `macos-15` (Apple Silicon); all other platforms passed.
+An unpublished tag may be replaced only deliberately, after verifying no public
+release exists; published release tags must not be moved.

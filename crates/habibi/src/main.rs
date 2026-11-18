@@ -6,6 +6,7 @@ mod login;
 mod mcp_auth;
 mod mcp_ui;
 mod program_status;
+mod resume_ui;
 mod tui;
 mod update;
 use anyhow::{Context, Result, bail, ensure};
@@ -15,7 +16,7 @@ use libhabibi::{
 };
 use std::{io::IsTerminal, path::PathBuf};
 
-const HELP: &str = "habibi — a native Rust coding agent (experimental)\n\nUsage:\n  habibi [--provider codex|claude|ollama] [--model ID] [--cwd DIR] [--skill-dir DIR] [--no-sticky-skills]\n  habibi [--ollama-url http://127.0.0.1:11434]\n  habibi -p \"PROMPT\" [--yolo]\n  habibi --rpc [-p \"PROMPT\"] [--yolo]\n  habibi models [codex|claude|ollama] [--ollama-url URL]\n  habibi --resume SESSION.jsonl\n  habibi login codex|claude\n  habibi logout codex|claude\n  habibi mcp login|status|logout SERVER [--client-id ID] [--scope SCOPE] [--callback-port PORT]\n\nSubscriptions use direct OAuth/model requests, never provider agent subprocesses.\nAdapters are experimental and not guaranteed provider-approved.\nTools ask by default; /settings offers explicit YOLO auto-approval. Shell commands and MCP servers are NOT sandboxed.\nMCP and code mode are enabled by default; toggle in /settings.\nMCP reads only $XDG_CONFIG_HOME/habibi/mcp.json (or ~/.config/habibi/mcp.json). Configured programs are trusted; no project discovery.\nCode mode nested tools still require approval.\n\nTUI: Enter submit/steer; Alt-Enter follow-up; Ctrl-Enter/Ctrl-J newline; PgUp/PgDn scroll; Esc interrupt; Ctrl-C cancel or quit.\nHeadless: -p runs once; --rpc serves JSON Lines on stdin/stdout. Tools deny by default; --yolo explicitly approves all.\nCommands: /mcp, /inspect, /compact, /models, /model, /settings, /update, /quit, /help. Subscriptions require login. Ollama requires a running server and an installed tool-capable model.\n";
+const HELP: &str = "habibi — a native Rust coding agent (experimental)\n\nUsage:\n  habibi [--provider codex|claude|ollama] [--model ID] [--cwd DIR] [--skill-dir DIR] [--no-sticky-skills]\n  habibi [--ollama-url http://127.0.0.1:11434]\n  habibi -p \"PROMPT\" [--yolo]\n  habibi --rpc [-p \"PROMPT\"] [--yolo]\n  habibi models [codex|claude|ollama] [--ollama-url URL]\n  habibi --resume SESSION.jsonl\n  habibi login codex|claude\n  habibi logout codex|claude\n  habibi mcp login|status|logout SERVER [--client-id ID] [--scope SCOPE] [--callback-port PORT]\n\nSubscriptions use direct OAuth/model requests, never provider agent subprocesses.\nAdapters are experimental and not guaranteed provider-approved.\nTools ask by default; /settings offers explicit YOLO auto-approval. Shell commands and MCP servers are NOT sandboxed.\nMCP and code mode are enabled by default; toggle in /settings.\nMCP reads only $XDG_CONFIG_HOME/habibi/mcp.json (or ~/.config/habibi/mcp.json). Configured programs are trusted; no project discovery.\nCode mode nested tools still require approval.\n\nTUI: Enter submit/steer; Alt-Enter follow-up; Ctrl-Enter/Ctrl-J newline; PgUp/PgDn scroll; Esc interrupt; Ctrl-C clear draft, otherwise cancel or quit.\nHeadless: -p runs once; --rpc serves JSON Lines on stdin/stdout. Tools deny by default; --yolo explicitly approves all.\nCommands: /resume, /mcp, /inspect, /compact, /models, /model, /settings, /update, /quit, /help. Subscriptions require login. Ollama requires a running server and an installed tool-capable model.\n";
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
@@ -87,7 +88,7 @@ async fn main() -> Result<()> {
         "The TUI requires a terminal. Use -p PROMPT or --rpc for headless operation."
     );
     let (session, path) = if let Some(path) = options.resume.clone() {
-        (Session::resume(&path, auth)?, path)
+        (Session::resume(&path, auth.clone())?, path)
     } else {
         let defaults = defaults::Defaults::load(&defaults::path()?)?;
         let mut config = options.config(&defaults);
@@ -97,7 +98,7 @@ async fn main() -> Result<()> {
         {
             config.ollama_url = host;
         }
-        let mut session = Session::new(config, auth)?;
+        let mut session = Session::new(config, auth.clone())?;
         let path = base_dir("XDG_DATA_HOME", ".local/share")?
             .join(format!("habibi/sessions/{}.jsonl", session.id()));
         session.persist(&path)?;
@@ -107,7 +108,7 @@ async fn main() -> Result<()> {
         return headless::run(session, path, options.prompt, options.rpc, options.yolo).await;
     }
     // Defer connections until a prompt so /mcp remains usable with broken servers.
-    tui::run(session, path).await
+    tui::run(session, path, auth).await
 }
 
 async fn list_models(args: &[String]) -> Result<()> {

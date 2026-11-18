@@ -32,6 +32,7 @@ use tokio::{
 use unicode_width::UnicodeWidthChar;
 
 const TRANSCRIPT_LIMIT: usize = 256 * 1024;
+type ResumeTarget = (Session, PathBuf, crate::control::Control);
 type Job = JoinHandle<(Session, Result<()>, mpsc::Receiver<String>)>;
 
 struct Screen;
@@ -486,6 +487,7 @@ struct View {
     dialog: Option<SettingsDialog>,
     mcp_manager: Option<crate::mcp_ui::Manager>,
     inspector: Option<crate::inspect::Inspector>,
+    resume_picker: Option<crate::resume_ui::Picker>,
     inspection: (Vec<(String, String)>, Vec<Message>),
     preferences: Preferences,
     model: String,
@@ -517,6 +519,7 @@ impl View {
             || self.dialog.is_some()
             || self.mcp_manager.is_some()
             || self.inspector.is_some()
+            || self.resume_picker.is_some()
             || self.details.is_some()
             || self.pending.is_some()
         {
@@ -995,7 +998,7 @@ impl View {
                     })),
                 sections[3],
             );
-            if self.dialog.is_none() && self.mcp_manager.is_none() && self.inspector.is_none() && self.details.is_none() && sections[2].width > 2 && sections[2].height > 2 {
+            if self.dialog.is_none() && self.mcp_manager.is_none() && self.inspector.is_none() && self.resume_picker.is_none() && self.details.is_none() && sections[2].width > 2 && sections[2].height > 2 {
                 frame.set_cursor_position((
                     sections[2].x + 1 + cursor_col as u16,
                     sections[2].y + 1 + cursor_row.saturating_sub(input_scroll) as u16,
@@ -1017,20 +1020,41 @@ impl View {
             if let Some(inspector) = &mut self.inspector {
                 inspector.draw(frame);
             }
+            if let Some(picker) = &mut self.resume_picker { picker.draw(frame); }
         })?;
         Ok(())
     }
 }
 
-pub async fn run(session: Session, path: PathBuf) -> Result<()> {
-    let session_id = session.id().to_string();
-    let mut control = crate::control::Control::bind(&session_id, &path)?;
-    // Restore the terminal even on panic, before Rust's normal panic report.
+pub async fn run(
+    mut session: Session,
+    mut path: PathBuf,
+    auth: libhabibi::auth::AuthStore,
+) -> Result<()> {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         drop(Screen);
         previous(info)
     }));
+    let mut control = crate::control::Control::bind(&session.id().to_string(), &path)?;
+    while let Some((next, next_path, next_control)) =
+        run_session(session, path, &auth, control).await?
+    {
+        session = next;
+        path = next_path;
+        control = next_control;
+    }
+    Ok(())
+}
+
+async fn run_session(
+    session: Session,
+    path: PathBuf,
+    auth: &libhabibi::auth::AuthStore,
+    mut control: crate::control::Control,
+) -> Result<Option<ResumeTarget>> {
+    let session_id = session.id().to_string();
+    let mut next_session = None;
     let _screen = Screen::enter()?;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     let mut program_status = crate::program_status::Reporter::terminal();
@@ -1048,6 +1072,7 @@ pub async fn run(session: Session, path: PathBuf) -> Result<()> {
         dialog: None,
         mcp_manager: None,
         inspector: None,
+        resume_picker: None,
         inspection: Default::default(),
         preferences: session.config().preferences.clone(),
         model: format!("{} / {}", session.config().provider, session.config().model),
@@ -1147,6 +1172,7 @@ pub async fn run(session: Session, path: PathBuf) -> Result<()> {
                         match method {
                             "status" => return Ok(json!({"session_id":session_id,"busy":job.is_some(),"stopping":interrupted,"queued":view.followups.len(),"pending_approvals":view.pending.iter().map(|(call,_)| &call.id).collect::<Vec<_>>(),"permission":view.pending.as_ref().map(|(call,_)|call),"socket":control.path})),
                             "prompt" | "follow_up" | "steer" => {
+                                ensure!(view.resume_picker.is_none(), "Session picker open; close it before sending a prompt");
                                 ensure!(!view.mcp_manager.as_ref().is_some_and(|m| m.authenticating()), "MCP authentication in progress; finish or cancel it first");
                                 let text = crate::control::text(params)?;
                                 ensure!(!interrupted, "Run is stopping; wait for idle");
@@ -1187,6 +1213,7 @@ pub async fn run(session: Session, path: PathBuf) -> Result<()> {
                     if shutdown { break; }
                 }
                 _=tick.tick()=>{
+                    if let Some(picker) = &mut view.resume_picker { dirty |= picker.poll(); }
                     if let Some(manager) = &mut view.mcp_manager {
                         let (changed, reconnect) = manager.poll_auth();
                         dirty |= changed;
@@ -1255,6 +1282,8 @@ pub async fn run(session: Session, path: PathBuf) -> Result<()> {
                         TerminalEvent::Resize(..)=>dirty=true,
                         TerminalEvent::Mouse(mouse) => {
                             match mouse.kind {
+                                MouseEventKind::ScrollUp if view.resume_picker.is_some() => view.resume_picker.as_mut().unwrap().step(false),
+                                MouseEventKind::ScrollDown if view.resume_picker.is_some() => view.resume_picker.as_mut().unwrap().step(true),
                                 MouseEventKind::ScrollUp if view.inspector.is_some() => view.inspector.as_mut().unwrap().scroll(false),
                                 MouseEventKind::ScrollDown if view.inspector.is_some() => view.inspector.as_mut().unwrap().scroll(true),
                                 MouseEventKind::ScrollUp if view.details.is_some() => view.details_scroll=view.details_scroll.saturating_sub(3),
@@ -1268,7 +1297,7 @@ pub async fn run(session: Session, path: PathBuf) -> Result<()> {
                         TerminalEvent::Paste(text)=>{
                             view.reset_completion();
                             program_status.acknowledge();
-                            if view.inspector.is_some() { continue; }
+                            if view.inspector.is_some() || view.resume_picker.is_some() { continue; }
                             if let Some(manager) = &mut view.mcp_manager { manager.paste(&text); dirty = true; continue; }
                             if let Some(dialog) = &mut view.dialog {
                                 if (3..9).contains(&dialog.selected) || dialog.selected == 10 || dialog.selected >= 12 { continue; }
@@ -1282,6 +1311,27 @@ pub async fn run(session: Session, path: PathBuf) -> Result<()> {
                         TerminalEvent::Key(key) if key.kind!=KeyEventKind::Release=>{
                             program_status.acknowledge();
                             dirty=true;
+                            if let Some(picker) = &mut view.resume_picker {
+                                match picker.key(key) {
+                                    crate::resume_ui::Action::None => {},
+                                    crate::resume_ui::Action::Close => view.resume_picker = None,
+                                    crate::resume_ui::Action::Open(next_path) => {
+                                        let result = Session::resume(&next_path, auth.clone());
+                                        match result {
+                                            Ok(next) if next.config().workspace == current_config.workspace => {
+                                                // Bind before dropping the old session, so a socket error leaves it intact.
+                                                match crate::control::Control::bind(&next.id().to_string(), &next_path) {
+                                                    Ok(next_control) => { next_session = Some((next, next_path, next_control)); break; },
+                                                    Err(error) => picker.error = format!("Cannot resume: {error:#}"),
+                                                }
+                                            }
+                                            Ok(_) => picker.error = "Session workspace changed; reopen the picker.".into(),
+                                            Err(error) => picker.error = format!("Cannot resume: {error:#}"),
+                                        }
+                                    }
+                                }
+                                continue;
+                            }
                             if let Some(inspector) = &mut view.inspector {
                                 if inspector.key(key) { view.inspector = None; }
                                 continue;
@@ -1389,6 +1439,11 @@ pub async fn run(session: Session, path: PathBuf) -> Result<()> {
                                             let (next_job, cancel, sender) = start_job(running, "/compact".into(), tx.clone());
                                             job = Some(next_job); cancellation = Some(cancel); steering_sender = Some(sender); interrupted = false;
                                         }
+                                        "/resume" if job.is_some() => view.message("Resume requires an idle agent. Esc interrupts the run."),
+                                        "/resume" => match crate::resume_ui::Picker::open(&current_config.workspace, &path) {
+                                            Ok(picker) => view.resume_picker = Some(picker),
+                                            Err(error) => view.message(&format!("Cannot list sessions: {error:#}")),
+                                        },
                                         "/mcp" if job.is_some() => view.message("MCP configuration requires an idle agent. Stop the run first."),
                                         "/mcp" => match crate::mcp_ui::Manager::open() {
                                             Ok(manager) => view.mcp_manager = Some(manager),
@@ -1415,8 +1470,8 @@ pub async fn run(session: Session, path: PathBuf) -> Result<()> {
                                                 view.message(&format!("Bundled {provider} subscription models (account availability varies):\n{}\n/model: Ctrl-N/P selects a model, or type any model ID; Enter saves it.", provider.models().join("\n")));
                                             }
                                         }
-                                        "/help"=>view.message("/mcp: add/configure/disable/remove MCP servers · /inspect: context and tool-call inspector · /compact: summarize context · /models: list models · /model: choose or edit model ID · /settings: model, limits, status bar, tool permissions · /update: upgrade instructions · /quit: exit\nEnter: submit/steer · Alt-Enter: follow-up · Ctrl-Enter/Ctrl-J: newline\n↑/↓: select suggestion · Tab: complete command or skill · /skill:name [request]: invoke a skill · PgUp/PgDn or mouse wheel: scroll · Shift-drag: terminal selection · Ctrl-U: clear input · Ctrl-A/E: line start/end · Alt-B/F: word left/right · Ctrl-W: delete word · Ctrl-K: delete to line end · Up/Down: prompt history (when completion is closed) · F2: inspect approval\nCommands work during execution; settings apply after the run. /compact and /quit require idle. Ctrl-C clears a nonempty prompt first; otherwise cancels or quits. Esc cancels; completed edits are not undone.\nAsk mode: Ctrl-Y allows once, Ctrl-N denies (or y/n in F2 inspector). YOLO auto-approves all tools. Neither mode is a sandbox.\nLogin: subscriptions use habibi login codex|claude outside the TUI. Ollama needs no login.\nResume: habibi --resume <session path shown above>."),
-                                        command if command.starts_with('/') => view.message("Unknown command. Available: /mcp, /inspect, /compact, /models, /model, /settings, /update, /help, /quit, /exit."),
+                                        "/help"=>view.message("/resume: browse sessions for this folder · /mcp: add/configure/disable/remove MCP servers · /inspect: context and tool-call inspector · /compact: summarize context · /models: list models · /model: choose or edit model ID · /settings: model, limits, status bar, tool permissions · /update: upgrade instructions · /quit: exit\nEnter: submit/steer · Alt-Enter: follow-up · Ctrl-Enter/Ctrl-J: newline\n↑/↓: select suggestion · Tab: complete command or skill · /skill:name [request]: invoke a skill · PgUp/PgDn or mouse wheel: scroll · Shift-drag: terminal selection · Ctrl-U: clear input · Ctrl-A/E: line start/end · Alt-B/F: word left/right · Ctrl-W: delete word · Ctrl-K: delete to line end · Up/Down: prompt history (when completion is closed) · F2: inspect approval\nCommands work during execution; settings apply after the run. /compact and /quit require idle. Ctrl-C clears a nonempty prompt first; otherwise cancels or quits. Esc cancels; completed edits are not undone.\nAsk mode: Ctrl-Y allows once, Ctrl-N denies (or y/n in F2 inspector). YOLO auto-approves all tools. Neither mode is a sandbox.\nLogin: subscriptions use habibi login codex|claude outside the TUI. Ollama needs no login.\nResume: /resume opens the folder-scoped session picker; CLI: habibi --resume <path>."),
+                                        command if command.starts_with('/') => view.message("Unknown command. Available: /resume, /mcp, /inspect, /compact, /models, /model, /settings, /update, /help, /quit, /exit."),
                                         _=>{
                                             view.scroll=0;view.message(&format!("You\n{prompt}"));
                                             let running=session.take().context("Session unavailable")?;
@@ -1452,7 +1507,8 @@ pub async fn run(session: Session, path: PathBuf) -> Result<()> {
     if let Some(job) = job {
         let _ = job.await;
     }
-    outcome
+    outcome?;
+    Ok(next_session)
 }
 
 /// Current RSS, not peak usage or child-process memory. No subprocesses.
@@ -1510,6 +1566,7 @@ const SLASH_COMMANDS: &[&str] = &[
     "/update",
     "/quit",
     "/exit",
+    "/resume",
 ];
 
 #[derive(Debug)]
@@ -1534,6 +1591,7 @@ fn slash_matches(input: &str, skills: &[(String, String)]) -> Vec<Suggestion> {
         "Upgrade instructions",
         "Quit",
         "Quit",
+        "Browse sessions for this folder",
     ];
     let mut matches: Vec<_> = SLASH_COMMANDS
         .iter()
@@ -1939,8 +1997,9 @@ mod tests {
                 .iter()
                 .map(|s| s.command.as_str())
                 .collect::<Vec<_>>(),
-            ["/skill:review", "/skill:release"]
+            ["/resume", "/skill:review", "/skill:release"]
         );
+        assert!(view.completion_key(key(KeyCode::Down, KeyModifiers::NONE)));
         assert!(view.completion_key(key(KeyCode::Down, KeyModifiers::NONE)));
         assert!(view.completion_key(key(KeyCode::Tab, KeyModifiers::NONE)));
         assert_eq!(view.input, "/skill:release ");
@@ -2131,6 +2190,7 @@ mod tests {
             dialog: None,
             mcp_manager: None,
             inspector: None,
+            resume_picker: None,
             inspection: Default::default(),
             preferences: Preferences::default(),
             model: "codex / custom".into(),

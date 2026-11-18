@@ -6,6 +6,7 @@ A small, native Rust coding-agent prototype: **`libhabibi` owns the agent loop; 
 
 [Release notes](RELEASE_NOTES.md) · [Quick-start website](https://habibiailabs.github.io/habibi-code/)
 
+- **Session picker:** `/resume` browses sessions for the current workspace with a searchable newest-first list and first-user/latest-message preview.
 - **Prompt editing:** Ctrl-C clears a nonempty draft first. Up/Down recalls editable prompts and restores your unfinished draft. Terminal-style line/word navigation and deletion shortcuts are supported. Mouse scrolling stays enabled; use terminal-native Shift-drag to select text.
 
 ### Included from v0.4.1
@@ -102,6 +103,26 @@ target/release/habibi --provider claude --model claude-sonnet-5-5
 target/release/habibi --resume /path/to/session.jsonl
 target/release/habibi logout codex
 ```
+
+**Resume without leaving Habibi:** run `/resume` while idle. The picker shows only
+sessions associated with the current canonical workspace folder, newest first.
+Use **Up/Down** or the mouse wheel to select; type to search by first message,
+model, or session ID; **PgUp/PgDn** scrolls the preview; **Enter** resumes;
+**Esc/Ctrl-C** closes without switching. The current session is marked with a dot.
+The preview shows the original first user message and last recorded message
+(including tool results), even across compaction. Wide terminals show list and
+preview side by side; narrow terminals stack them.
+
+Browsing is read-only and runs in the background. It scans the standard data
+session directory and the current journal's directory (not arbitrary workspace
+files), considering the newest 1,000 journal files. Invalid headers and symlinks
+are skipped. Previews use the first/last 256 KiB and truncate individual messages;
+large records may be unavailable, explicitly noted in the UI. Selecting a locked
+or invalid journal reports an error without dropping the current session.
+Switching restores saved settings and permissions (including YOLO), leaves the
+old journal intact, and replaces the local control socket/identity. Socket clients
+must rediscover the instance. CLI `--resume PATH` remains available for other
+folders or journals outside the picker limits.
 
 `--resume` restores the saved model, provider, workspace, and history. It cannot be combined with model/workspace overrides. MCP/code-mode preferences are restored on resume. Model availability depends on your account; use `--model` to override the defaults.
 

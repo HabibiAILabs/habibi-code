@@ -21,7 +21,7 @@ import time
 binary = Path(sys.argv[1] if len(sys.argv) > 1 else "target/release/habibi").resolve()
 
 
-def launch(args, env, workspace):
+def launch(args, env, workspace, resume_id=None):
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 100, 0, 0))
     initial = termios.tcgetattr(slave)
@@ -50,13 +50,14 @@ def launch(args, env, workspace):
             def screen_text(data):
                 cells = [[" " for _ in range(100)] for _ in range(24)]
                 row = col = 0
-                for token in re.findall(r"\x1b\[[0-?]*[ -/]*[@-~]|[^\x1b]", data.decode("utf-8", errors="replace")):
-                    if token.startswith("\x1b["):
+                for token in re.findall(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-?]*[ -/]*[@-~]|[^\x1b]", data.decode("utf-8", errors="replace")):
+                    if token.startswith("\x1b]"): pass
+                    elif token.startswith("\x1b["):
                         if token[-1] in "Hf":
                             coords = token[2:-1].split(";")
                             row = int(coords[0] or 1) - 1
                             col = int(coords[1] or 1) - 1 if len(coords) > 1 else 0
-                        elif token == "\x1b[2J":
+                        elif token in ("\x1b[2J", "\x1b[?1049h"):
                             cells = [[" " for _ in range(100)] for _ in range(24)]
                     elif token == "\n": row += 1
                     elif token == "\r": col = 0
@@ -66,7 +67,7 @@ def launch(args, env, workspace):
                         col += 1
                 return "\n".join("".join(line) for line in cells).encode()
             while marker not in screen_text(output + received):
-                assert time.monotonic() < deadline, "Modal interaction timed out: " + repr(received)
+                assert time.monotonic() < deadline, "Modal interaction timed out: " + repr(screen_text(output + received))
                 if select.select([master], [], [], 0.1)[0]:
                     received.extend(os.read(master, 65536))
                 assert process.poll() is None, "TUI exited during modal interaction"
@@ -77,6 +78,27 @@ def launch(args, env, workspace):
         # Ctrl-C clears the composer, rather than quitting; the next command works.
         os.write(master, b"\x03")
         time.sleep(0.1)
+        send_and_wait(b"/resume\r", b"Resume session")
+        send_and_wait(b"foreign-only", b"No sessions match")
+        os.write(master, b"\x03")
+        time.sleep(0.1)
+        if resume_id:
+            send_and_wait(b"/resume\r", b"Resume session")
+            send_and_wait(b"resume-fixture-first", b"resume-fixture-last")
+            target = Path(env["XDG_DATA_HOME"]) / "habibi/sessions" / f"{resume_id}.jsonl"
+            with target.open("r+b") as locked:
+                fcntl.flock(locked, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                send_and_wait(b"\r", b"already open elsewhere")
+                fcntl.flock(locked, fcntl.LOCK_UN)
+            os.write(master, b"\r")
+            deadline = time.monotonic() + 5
+            while True:
+                instances = list(Path(env["XDG_RUNTIME_DIR"]).glob("habibi-*/instance.json"))
+                if any(json.loads(p.read_text())["session_id"] == resume_id for p in instances):
+                    break
+                assert time.monotonic() < deadline, "picker did not switch control/session identity"
+                time.sleep(0.05)
+            time.sleep(0.1)
         send_and_wait(b"/inspect\r", b"Budget")
         send_and_wait(b"\t", b"latest")
         send_and_wait(b"a", b"All session tool calls")
@@ -172,6 +194,9 @@ def check_private_login(env, workspace, cancel=False):
 with tempfile.TemporaryDirectory(prefix="habibi-smoke-") as directory:
     root = Path(directory)
     env = dict(os.environ, HABIBI_NO_UPDATE_CHECK="1", TERM="xterm-256color", XDG_CONFIG_HOME=str(root / "config"), XDG_DATA_HOME=str(root / "data"))
+    runtime = root / "runtime"
+    runtime.mkdir()
+    env["XDG_RUNTIME_DIR"] = str(runtime)
     timings = []
     for _ in range(20):
         started = time.perf_counter()
@@ -187,6 +212,23 @@ with tempfile.TemporaryDirectory(prefix="habibi-smoke-") as directory:
     sessions = list((root / "data/habibi/sessions").glob("*.jsonl"))
     assert len(sessions) == 5
     launch(["--resume", str(sessions[0])], env, root)
+    # Picker switch loads the selected transcript and rebinds local control identity.
+    import uuid
+    header = json.loads(sessions[0].read_text().splitlines()[0])
+    target_id = str(uuid.uuid4())
+    header["id"] = target_id
+    target = sessions[0].parent / f"{target_id}.jsonl"
+    records = [header,
+        {"record": "message", "message": {"type": "user", "text": "resume-fixture-first"}},
+        {"record": "message", "message": {"type": "assistant", "text": "resume-fixture-last", "tool_calls": [], "native": []}}]
+    target.write_text("".join(json.dumps(r) + "\n" for r in records))
+    foreign = json.loads(json.dumps(header))
+    foreign["id"] = str(uuid.uuid4())
+    foreign["config"]["workspace"] = str(root / "runtime")
+    (target.parent / "foreign.jsonl").write_text(json.dumps(foreign) + "\n" + json.dumps({"record":"message", "message":{"type":"user", "text":"foreign-only"}}) + "\n")
+    launch(["--resume", str(sessions[0])], env, root, resume_id=target_id)
+    assert target.read_text().startswith(json.dumps(header) + "\n"), "switch replaced journal"
+    assert not list(runtime.glob("habibi-*")), "control socket leaked after switching"
     assert not (root / "config/habibi/auth").exists(), "TUI accessed credentials"
     defaults = json.loads((root / "config/habibi/settings.json").read_text())
     assert defaults["models"]["codex"] == "smoke-custom-model", "model default was not saved"
