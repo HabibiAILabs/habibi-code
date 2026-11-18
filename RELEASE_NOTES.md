@@ -1,3 +1,24 @@
+# Habibi v0.6.1
+
+Fix the RAM status indicator on macOS.
+
+- Read current-process resident memory using macOS `proc_pidinfo` instead of always displaying `RAM n/a`.
+- Match Linux RSS semantics: current memory, not peak usage, with child processes excluded. No subprocesses or elevated permissions are needed.
+- Preserve `n/a` as a safe fallback if the OS query fails.
+- Add a runtime RSS regression test for Linux and both macOS CI architectures.
+
+Existing configuration and session journals remain compatible. macOS binaries remain unsigned and not notarized.
+
+## Install or upgrade
+
+```sh
+curl -fsSL https://habibiailabs.github.io/habibi-code/install.sh | sh
+```
+
+Restart Habibi after upgrading. Enable the RAM indicator in `/settings` if it is hidden.
+
+---
+
 # Habibi v0.6.0
 
 Native image reading for vision-capable models.

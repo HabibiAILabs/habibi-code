@@ -1525,7 +1525,29 @@ fn process_ram() -> Option<usize> {
             .ok()?;
         kb.checked_mul(1024)
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        let mut info = std::mem::MaybeUninit::<libc::proc_taskinfo>::uninit();
+        let size = std::mem::size_of::<libc::proc_taskinfo>();
+        // SAFETY: the buffer is aligned and large enough for proc_taskinfo. The
+        // API writes at most the supplied size; read it only after a full result.
+        let written = unsafe {
+            libc::proc_pidinfo(
+                libc::getpid(),
+                libc::PROC_PIDTASKINFO,
+                0,
+                info.as_mut_ptr().cast(),
+                size as libc::c_int,
+            )
+        };
+        if written != size as libc::c_int {
+            return None;
+        }
+        // SAFETY: a full PROC_PIDTASKINFO result initializes all fields.
+        let info = unsafe { info.assume_init() };
+        usize::try_from(info.pti_resident_size).ok()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         None
     }
@@ -1866,6 +1888,14 @@ fn wrap_input(text: &str, cursor: usize, width: usize) -> (Vec<String>, usize, u
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn current_process_ram_is_available() {
+        let bytes = process_ram().expect("current-process RSS should be available");
+        assert!(bytes > 0, "a running process must have resident memory");
+    }
+
     #[test]
     fn activity_animation_bounces_and_does_not_duplicate_status() {
         assert_eq!(activity_ball(0), "●·····");
