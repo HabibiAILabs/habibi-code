@@ -37,6 +37,7 @@ impl Inspector {
                     call_id,
                     output,
                     is_error,
+                    ..
                 } => Some((call_id.as_str(), (output.as_str(), *is_error))),
                 _ => None,
             })
@@ -297,6 +298,7 @@ mod tests {
                 },
                 call("old"),
                 Message::ToolResult {
+                    images: Vec::new(),
                     call_id: "old".into(),
                     output: "old output".into(),
                     is_error: false,
@@ -306,6 +308,7 @@ mod tests {
                 },
                 call("new"),
                 Message::ToolResult {
+                    images: Vec::new(),
                     call_id: "new".into(),
                     output: "Denied by user\u{1b}[2J".into(),
                     is_error: true,

@@ -296,6 +296,7 @@ impl Tool for McpTool {
                 "MCP result exceeds 1 MiB; request a smaller result"
             );
             Ok(ToolOutput {
+                images: Vec::new(),
                 text: String::new(),
                 structured: Some(value),
                 is_error,

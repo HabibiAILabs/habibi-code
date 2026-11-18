@@ -15,9 +15,18 @@ pub struct ToolDefinition {
     pub schema: Value,
 }
 
+/// An inline image for vision-capable models.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ImageAttachment {
+    pub media_type: String,
+    pub data: String,
+}
+
 /// Structured execution value. Provider/journal rendering is deliberately separate.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ToolOutput {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ImageAttachment>,
     pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub structured: Option<Value>,
@@ -28,6 +37,7 @@ pub struct ToolOutput {
 impl ToolOutput {
     pub fn text(text: impl Into<String>) -> Self {
         Self {
+            images: Vec::new(),
             text: text.into(),
             structured: None,
             is_error: false,
@@ -222,6 +232,7 @@ mod tests {
     #[test]
     fn structured_results_are_not_silently_discarded() {
         let output = ToolOutput {
+            images: Vec::new(),
             text: "ok".into(),
             structured: Some(json!({"count":3})),
             is_error: false,

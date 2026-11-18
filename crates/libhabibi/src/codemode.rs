@@ -25,7 +25,7 @@ pub(crate) struct Request {
 pub(crate) fn definition() -> ToolDefinition {
     ToolDefinition {
         name: "codemode".into(),
-        description: "Run an async JavaScript function body in a restricted VM. Use await tools[name](args), text(value), console.log(value), return value, searchTools(query), describeTool(name). No filesystem, network, Node APIs, imports or timers. Every nested tool call requires separate approval. Use Promise.all or Promise.allSettled for parallel calls (up to 8 in flight). Approval prompts are serialized. Await dependent operations explicitly. Built-ins return text; MCP tools return their full CallToolResult. Only explicit output reaches the model; child calls are audited. No nested codemode. Limits: 120 seconds including approval waits, 64 MiB memory, 64 KiB output, 64 calls. Completed side effects are not rolled back on failure.".into(),
+        description: "Run an async JavaScript function body in a restricted VM. Use await tools[name](args), text(value), console.log(value), return value, searchTools(query), describeTool(name). No filesystem, network, Node APIs, imports or timers. Every nested tool call requires separate approval. Use Promise.all or Promise.allSettled for parallel calls (up to 8 in flight). Approval prompts are serialized. Await dependent operations explicitly. Built-ins return text; MCP tools return their full CallToolResult. Only explicit text output reaches the model; images from child calls are automatically attached. Child calls are audited. No nested codemode. Limits: 120 seconds including approval waits, 64 MiB memory, 64 KiB output, 64 calls. Completed side effects are not rolled back on failure.".into(),
         schema: json!({"type":"object","properties":{"code":{"type":"string","minLength":1,"maxLength":65536}},"required":["code"],"additionalProperties":false}),
     }
 }
@@ -210,6 +210,7 @@ pub(crate) fn run(
         text.push_str(&error);
     }
     Ok(ToolOutput {
+        images: Vec::new(),
         text,
         structured: None,
         is_error,

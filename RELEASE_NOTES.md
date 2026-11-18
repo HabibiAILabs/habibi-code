@@ -1,3 +1,25 @@
+# Habibi v0.6.0
+
+Native image reading for vision-capable models.
+
+- **Image attachments:** `read` detects PNG, JPEG, GIF, and WebP by signature and sends native image content through Codex, Claude, and Ollama adapters, rather than base64 text.
+- **Model capabilities:** Ollama checks reported vision support before sending images. Hosted providers validate the selected model; a vision-capable model is required.
+- **Code mode and resume:** approved child image reads are automatically forwarded to the model, and attachments persist in session journals. Code-mode attachments have an 8 MiB combined base64 limit.
+- **Useful binary-file errors:** PDFs and other non-text files receive extraction guidance instead of opaque UTF-8 errors. Automatic PDF extraction is not included.
+- **Preserved safeguards:** file approvals, workspace confinement, regular-file checks, and the 2 MiB file limit remain in place. Image context accounting uses a 16 KiB text-equivalent estimate per image.
+
+Existing journals remain readable. Journals containing images include the image data and should be treated as sensitive. Library users constructing `ToolOutput` or `Message::ToolResult` must supply the new `images` field. Live provider vision testing is not included in automated validation. macOS binaries remain unsigned and not notarized.
+
+## Install or upgrade
+
+```sh
+curl -fsSL https://habibiailabs.github.io/habibi-code/install.sh | sh
+```
+
+Restart Habibi after upgrading and select a vision-capable model to read images.
+
+---
+
 # Habibi v0.5.0
 
 A more terminal-like prompt editor and a folder-scoped session browser.

@@ -2,7 +2,14 @@
 
 A small, native Rust coding-agent prototype: **`libhabibi` owns the agent loop; `habibi` is its full-screen terminal frontend.** No external JavaScript runtime, Habibi daemon, or provider-agent subprocess (Ollama runs as a separate server). Optional code mode embeds QuickJS; explicitly configured MCP servers may run as child processes. Without MCP connections, a best-effort background GitHub release check is the only idle network activity; it never contacts model providers.
 
-## What's new in v0.5.0
+## What's new in v0.6.0
+
+`read` now attaches PNG, JPEG, GIF, and WebP images as native content for
+vision-capable models, including through code mode and resumed sessions. Ollama
+checks model vision support. PDFs and other binary formats receive extraction
+guidance. See [Reading images and other files](#reading-images-and-other-files).
+
+## Previous release: v0.5.0
 
 [Release notes](RELEASE_NOTES.md) · [Quick-start website](https://habibiailabs.github.io/habibi-code/)
 
@@ -600,3 +607,22 @@ can send JSON Lines requests to check status, steer, queue follow-ups, answer
 pending approvals, stop, or shut down the instance without taking over its
 terminal. See [Local RPC and socket control](docs/rpc.md) for discovery,
 permissions, protocol examples, and mode-specific behavior.
+
+### Reading images and other files
+
+`read` displays UTF-8 text with line numbers and attaches PNG, JPEG, GIF, and
+WebP files as native image content (detected by signature, not filename).
+The selected model must support vision. Ollama's model capability metadata is
+checked before sending images; models without reported vision support produce
+an actionable error. Hosted providers validate support for the selected model.
+Image reads retain normal approvals, workspace confinement, and the 2 MiB file
+limit. Line offset/limit apply only to text. Code-mode automatically forwards
+images from approved child reads, with an 8 MiB combined base64 limit per call.
+Images are retained in session journals; treat those journals as sensitive.
+Context accounting reserves 16 KiB of text-equivalent budget per image rather
+than counting base64 transport bytes (an estimate, not an exact token count).
+
+PDFs and other binary formats are not automatically decoded. `read` explains
+when extraction is needed: for example, use `pdftotext` for a PDF's text or
+render its pages to images for visual inspection. These commands require
+approval and the relevant local utilities.

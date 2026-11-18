@@ -13,6 +13,6 @@ mod sse;
 mod tools;
 
 pub use provider::Provider;
-pub use registry::{Tool, ToolContext, ToolDefinition, ToolFuture, ToolOutput};
+pub use registry::{ImageAttachment, Tool, ToolContext, ToolDefinition, ToolFuture, ToolOutput};
 pub use session::{Event, Message, Preferences, Session, SessionConfig, ToolCall};
 pub use tokio_util::sync::CancellationToken;

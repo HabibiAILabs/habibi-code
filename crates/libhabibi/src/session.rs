@@ -37,10 +37,24 @@ pub enum Message {
         native: Vec<Value>,
     },
     ToolResult {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<crate::registry::ImageAttachment>,
         call_id: String,
         output: String,
         is_error: bool,
     },
+}
+
+// Base64 transport bytes are not text tokens. Reserve a conservative text-equivalent
+// budget per image so a single image cannot exhaust the default budget.
+fn message_context_bytes(message: &Message) -> Result<usize> {
+    let mut bytes = serde_json::to_vec(message)?.len();
+    if let Message::ToolResult { images, .. } = message {
+        for image in images {
+            bytes = bytes.saturating_sub(image.data.len()) + 16 * 1024;
+        }
+    }
+    Ok(bytes)
 }
 
 /// Consume events concurrently with `Session::prompt`. Reply to each Permission event.
@@ -382,7 +396,7 @@ impl Session {
                     session.loaded_skills.insert(name, content);
                 }
                 Record::Message { message } => {
-                    session.context_bytes += serde_json::to_vec(&message)?.len();
+                    session.context_bytes += message_context_bytes(&message)?;
                     session.track_tool_history(&message);
                     session.messages.push(message);
                 }
@@ -794,11 +808,12 @@ impl Session {
                 if result.is_err() && cancel.is_cancelled() {
                     bail!("Cancelled");
                 }
-                let (output, is_error) = match result {
-                    Ok(output) => (output.render(), output.is_error),
-                    Err(error) => (format!("{error:#}"), true),
+                let (output, is_error, images) = match result {
+                    Ok(output) => (output.render(), output.is_error, output.images),
+                    Err(error) => (format!("{error:#}"), true, Vec::new()),
                 };
                 self.append(Message::ToolResult {
+                    images,
                     call_id: call.id.clone(),
                     output: output.clone(),
                     is_error,
@@ -893,7 +908,8 @@ impl Session {
             let _permit = permit;
             codemode::run(code, definitions, tx, worker_cancel, deadline)
         });
-        let mut completed = None;
+        let mut images = Vec::new();
+        let mut completed: Option<Result<ToolOutput>> = None;
         let mut failure = None;
         let mut queue: VecDeque<Invocation> = VecDeque::new();
         let mut approval: Option<BoxFuture<'static, Approved>> = None;
@@ -932,7 +948,10 @@ impl Session {
                 if let Some(error) = failure {
                     return Err(error);
                 }
-                return completed.take().unwrap();
+                return completed.take().unwrap().map(|mut output| {
+                    output.images = images;
+                    output
+                });
             }
             tokio::select! {
                 result = &mut worker, if completed.is_none() => {
@@ -977,6 +996,12 @@ impl Session {
                     }
                 }
                 Some(((call, reply), result)) = running.next(), if !running.is_empty() => {
+                    let result = result.and_then(|output| {
+                        let total: usize = images.iter().chain(output.images.iter()).map(|image: &crate::registry::ImageAttachment| image.data.len()).sum();
+                        ensure!(total <= 8 * 1024 * 1024, "Code-mode image attachments exceed 8 MiB; read fewer images per invocation");
+                        images.extend(output.images.clone());
+                        Ok(output)
+                    });
                     if let Err(error) = self.finish_child(call, reply, result, events).await { failure.get_or_insert(error); child_cancel.cancel(); }
                 }
             }
@@ -995,6 +1020,7 @@ impl Session {
             Err(error) => (format!("{error:#}"), true),
         };
         self.audit_tool(Message::ToolResult {
+            images: Vec::new(),
             call_id: call.id.clone(),
             output: output.clone(),
             is_error,
@@ -1051,7 +1077,7 @@ impl Session {
                 message: message.clone(),
             })?;
         }
-        self.context_bytes += serde_json::to_vec(&message)?.len();
+        self.context_bytes += message_context_bytes(&message)?;
         self.track_tool_history(&message);
         self.messages.push(message);
         Ok(())
@@ -1083,7 +1109,7 @@ impl Session {
     /// Human-readable context sections for inspection, not an exact provider wire payload.
     /// Native provider blocks are counted in message byte sizes but omitted from previews.
     pub fn inspect_context(&self) -> Vec<(String, String)> {
-        let size = |value: &Message| serde_json::to_vec(value).expect("message JSON").len();
+        let size = |value: &Message| message_context_bytes(value).expect("message JSON");
         let mut overview = format!(
             "Model: {} / {}\nWorkspace: {}\n\nBudget usage: {} / {} bytes ({:.1}%)\nConversation: {} bytes\nSkill context: {} bytes\nSystem prompt: {} bytes (outside budget)\n\nBytes are not tokens. Provider formatting and tool schemas add overhead.\nNative provider blocks are counted but not displayed.\nOnly active context is shown; compacted tool history is in the Tool calls tab.\n\n",
             self.config.provider,
@@ -1154,6 +1180,7 @@ impl Session {
                     call_id,
                     output,
                     is_error,
+                    ..
                 } => (
                     "Tool result",
                     format!("Call ID: {call_id}\nError: {is_error}\n\n{output}"),
@@ -1189,7 +1216,7 @@ impl Session {
             .cloned()
             .collect();
         for call in pending {
-            self.append(Message::ToolResult { call_id:call.id,output:"Interrupted. Execution may have partially completed; inspect state before retrying.".into(),is_error:true })?;
+            self.append(Message::ToolResult { images: Vec::new(), call_id:call.id,output:"Interrupted. Execution may have partially completed; inspect state before retrying.".into(),is_error:true })?;
         }
         Ok(())
     }
@@ -1252,6 +1279,9 @@ async fn execute_tool(
                 },
             )
             .await;
+    }
+    if call.name == "read" {
+        return tools::read_attachment(workspace, call).await;
     }
     let text = if call.name == "bash" {
         tokio::select! {
@@ -1340,6 +1370,7 @@ mod tests {
             Box::pin(async move {
                 self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 Ok(ToolOutput {
+                    images: Vec::new(),
                     text: "echo".into(),
                     structured: Some(arguments),
                     is_error: false,
@@ -1713,6 +1744,7 @@ for line in sys.stdin:
                 .unwrap();
             session
                 .append(Message::ToolResult {
+                    images: Vec::new(),
                     call_id: "call1".into(),
                     output: "full output".into(),
                     is_error: false,

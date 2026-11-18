@@ -77,6 +77,32 @@ impl Client {
         summary: bool,
         definitions: &[ToolDefinition],
     ) -> Result<Completion> {
+        if history.iter().any(
+            |message| matches!(message, Message::ToolResult { images, .. } if !images.is_empty()),
+        ) {
+            let response = crate::retry::send(
+                self.http
+                    .post(self.base.join("api/show")?)
+                    .timeout(Duration::from_secs(15))
+                    .json(&json!({"model": model})),
+                Some(events),
+            )
+            .await
+            .context("Could not check Ollama model vision capability")?;
+            ensure!(
+                response.status().is_success(),
+                "Could not check Ollama model vision capability ({})",
+                response.status()
+            );
+            let body: Value =
+                serde_json::from_slice(&bounded_body(response, 4 * 1024 * 1024).await?)?;
+            ensure!(
+                body["capabilities"]
+                    .as_array()
+                    .is_some_and(|caps| caps.iter().any(|cap| cap == "vision")),
+                "Ollama model {model} does not report vision support. Select a vision-capable model to read images (or upgrade Ollama if capability metadata is unavailable)."
+            );
+        }
         let response = crate::retry::send(
             self.http
                 .post(self.base.join("api/chat")?)
@@ -122,7 +148,10 @@ fn request_body(
             Message::User { text } => messages.push(json!({"role":"user","content":text})),
             Message::Assistant { native, .. } => messages.extend(native.iter().cloned()),
             Message::ToolResult {
-                call_id, output, ..
+                call_id,
+                output,
+                images,
+                ..
             } => {
                 let name = history
                     .iter()
@@ -135,6 +164,9 @@ fn request_body(
                     })
                     .unwrap_or("");
                 messages.push(json!({"role":"tool","tool_name":name,"content":output}));
+                if !images.is_empty() {
+                    messages.push(json!({"role":"user","content":format!("Images from tool call {call_id}:"),"images":images.iter().map(|image| &image.data).collect::<Vec<_>>()}));
+                }
             }
         }
     }
@@ -328,6 +360,7 @@ mod tests {
                     tool_calls: result.calls.clone(),
                 },
                 Message::ToolResult {
+                    images: Vec::new(),
                     call_id: result.calls[0].id.clone(),
                     output: "found".into(),
                     is_error: false,

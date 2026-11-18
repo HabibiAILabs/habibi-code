@@ -25,7 +25,7 @@ pub(crate) fn definitions() -> Vec<Definition> {
         },
         Definition {
             name: "read".into(),
-            description: "Read a UTF-8 workspace file with line numbers. Maximum file size 2 MiB.".into(),
+            description: "Read UTF-8 text with line numbers or attach PNG, JPEG, GIF, or WebP images for a vision-capable model. Maximum 2 MiB. Images ignore line offset/limit. PDFs and other binary formats require extraction using a suitable tool.".into(),
             schema: json!({"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer","minimum":1},"limit":{"type":"integer","minimum":1,"maximum":5000}},"required":["path"],"additionalProperties":false}),
         },
         Definition {
@@ -169,7 +169,7 @@ fn resolve(root: &Path, requested: &str, allow_new: bool) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn read_file(path: &Path) -> Result<String> {
+fn read_bytes(path: &Path) -> Result<Vec<u8>> {
     let mut options = fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -185,7 +185,64 @@ fn read_file(path: &Path) -> Result<String> {
         bytes.len() <= MAX_FILE,
         "File exceeds 2 MiB; use a targeted shell command"
     );
-    String::from_utf8(bytes).context("File is not valid UTF-8")
+    Ok(bytes)
+}
+
+fn read_file(path: &Path) -> Result<String> {
+    let bytes = read_bytes(path)?;
+    ensure!(
+        !bytes.starts_with(b"%PDF-"),
+        "PDF document: extract text with a tool such as pdftotext, or render pages to PNG for a vision-capable model"
+    );
+    ensure!(
+        !bytes.contains(&0),
+        "Binary file: use a format-specific extraction tool or a targeted shell command"
+    );
+    String::from_utf8(bytes).context("Unsupported non-UTF-8 file: use a format-specific extraction tool or convert the text encoding")
+}
+
+pub(crate) async fn read_attachment(
+    root: &Path,
+    call: &ToolCall,
+) -> Result<crate::registry::ToolOutput> {
+    let root = root.to_owned();
+    let call = call.clone();
+    tokio::task::spawn_blocking(move || {
+        use crate::registry::{ImageAttachment, ToolOutput};
+        use base64::Engine;
+        let args: ReadArgs = serde_json::from_value(call.arguments.clone())?;
+        ensure!(
+            args.offset >= 1 && (1..=5000).contains(&args.limit),
+            "Read offset must be >=1 and limit 1..5000"
+        );
+        let bytes = read_bytes(&resolve(&root, &args.path, false)?)?;
+        let media_type = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+            Some("image/png")
+        } else if bytes.starts_with(b"\xff\xd8\xff") {
+            Some("image/jpeg")
+        } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+            Some("image/gif")
+        } else if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
+            Some("image/webp")
+        } else {
+            None
+        };
+        if let Some(media_type) = media_type {
+            let mut output = ToolOutput::text(format!(
+                "Image: {} ({media_type}, {} bytes). Requires a vision-capable model.",
+                args.path,
+                bytes.len()
+            ));
+            output.images.push(ImageAttachment {
+                media_type: media_type.into(),
+                data: base64::engine::general_purpose::STANDARD.encode(bytes),
+            });
+            Ok(output)
+        } else {
+            execute_file(&root, &call).map(ToolOutput::text)
+        }
+    })
+    .await?
 }
 
 fn replace_once(contents: &str, old: &str, new: &str) -> Result<String> {
@@ -369,5 +426,59 @@ mod tests {
             .await
             .unwrap();
         assert!(output.contains("[output truncated]") && output.len() < MAX_OUTPUT + 200);
+    }
+}
+
+#[cfg(test)]
+mod image_tests {
+    use super::*;
+    use base64::Engine;
+
+    #[tokio::test]
+    async fn reads_images_by_signature_and_rejects_binary_documents() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        // A real 1x1 PNG, intentionally without an image extension.
+        let bytes = base64::engine::general_purpose::STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a3ioAAAAASUVORK5CYII=").unwrap();
+        fs::write(root.join("fixture"), &bytes).unwrap();
+        let call = |path: &str| ToolCall {
+            id: "read".into(),
+            name: "read".into(),
+            arguments: json!({"path":path}),
+        };
+        let output = read_attachment(&root, &call("fixture")).await.unwrap();
+        assert_eq!(output.images.len(), 1);
+        assert_eq!(output.images[0].media_type, "image/png");
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(&output.images[0].data)
+                .unwrap(),
+            bytes
+        );
+        assert!(!output.render().contains(&output.images[0].data));
+        fs::write(root.join("text"), "hello\nworld").unwrap();
+        assert_eq!(
+            read_attachment(&root, &call("text")).await.unwrap().text,
+            "1: hello\n2: world\n"
+        );
+        fs::write(root.join("doc"), "%PDF-1.7").unwrap();
+        assert!(
+            read_attachment(&root, &call("doc"))
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("pdftotext")
+        );
+        fs::write(root.join("binary"), [0, 1, 2]).unwrap();
+        assert!(
+            read_attachment(&root, &call("binary"))
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("Binary file")
+        );
+        fs::write(root.join("large"), vec![0; MAX_FILE + 1]).unwrap();
+        assert!(read_attachment(&root, &call("large")).await.is_err());
+        assert!(read_attachment(&root, &call("../outside")).await.is_err());
     }
 }

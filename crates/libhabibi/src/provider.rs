@@ -273,10 +273,15 @@ fn request_body(
                         .push(json!({"role":"user","content":[{"type":"input_text","text":text}]})),
                     Message::Assistant { native, .. } => input.extend(native.iter().cloned()),
                     Message::ToolResult {
-                        call_id, output, ..
-                    } => input.push(
-                        json!({"type":"function_call_output","call_id":call_id,"output":output}),
-                    ),
+                        call_id,
+                        output,
+                        images,
+                        ..
+                    } => {
+                        let mut content = vec![json!({"type":"input_text","text":output})];
+                        content.extend(images.iter().map(|image| json!({"type":"input_image","image_url":format!("data:{};base64,{}", image.media_type, image.data)})));
+                        input.push(json!({"type":"function_call_output","call_id":call_id,"output": if images.is_empty() { json!(output) } else { json!(content) }}));
+                    }
                 }
             }
             json!({
@@ -296,10 +301,15 @@ fn request_body(
                         call_id,
                         output,
                         is_error,
+                        images,
                     } => (
                         "user",
                         vec![
-                            json!({"type":"tool_result","tool_use_id":call_id,"content":output,"is_error":is_error}),
+                            json!({"type":"tool_result","tool_use_id":call_id,"content": if images.is_empty() { json!(output) } else {
+                                let mut content = vec![json!({"type":"text","text":output})];
+                                content.extend(images.iter().map(|image| json!({"type":"image","source":{"type":"base64","media_type":image.media_type,"data":image.data}})));
+                                json!(content)
+                            },"is_error":is_error}),
                         ],
                     ),
                 };
@@ -610,6 +620,7 @@ mod tests {
         let messages = vec![
             Message::User { text: "hi".into() },
             Message::ToolResult {
+                images: Vec::new(),
                 call_id: "c".into(),
                 output: "ok".into(),
                 is_error: false,
@@ -634,5 +645,39 @@ mod tests {
         );
         assert_eq!(codex["store"], false);
         assert_eq!(codex["input"][1]["call_id"], "c");
+    }
+    #[test]
+    fn images_are_native_content_not_base64_text() {
+        let history = vec![Message::ToolResult {
+            call_id: "image-read".into(),
+            output: "Image attached".into(),
+            is_error: false,
+            images: vec![crate::ImageAttachment {
+                media_type: "image/png".into(),
+                data: "aGVsbG8=".into(),
+            }],
+        }];
+        let codex = request_body(Provider::Codex, "test", "system", "id", &history, &[]);
+        assert_eq!(codex["input"][0]["output"][1]["type"], "input_image");
+        assert_eq!(
+            codex["input"][0]["output"][1]["image_url"],
+            "data:image/png;base64,aGVsbG8="
+        );
+        let claude = request_body(Provider::Claude, "test", "system", "id", &history, &[]);
+        assert_eq!(
+            claude["messages"][0]["content"][0]["content"][1]["source"]["data"],
+            "aGVsbG8="
+        );
+        let serialized = serde_json::to_string(&history).unwrap();
+        let restored: Vec<Message> = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(
+            request_body(Provider::Codex, "test", "system", "id", &restored, &[]),
+            codex
+        );
+        let old: Message = serde_json::from_value(
+            json!({"type":"tool_result","call_id":"old","output":"text","is_error":false}),
+        )
+        .unwrap();
+        assert!(matches!(old, Message::ToolResult { images, .. } if images.is_empty()));
     }
 }
