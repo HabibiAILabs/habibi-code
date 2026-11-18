@@ -50,6 +50,12 @@ fn messages(bytes: &[u8]) -> impl Iterator<Item = Value> + '_ {
     })
 }
 fn read_entry(path: PathBuf, workspace: &Path, current: &Path) -> Result<Option<Entry>> {
+    // Normalize both sides, including macOS /var -> /private/var aliases.
+    let workspace = workspace.canonicalize()?;
+    let current = current
+        .canonicalize()
+        .unwrap_or_else(|_| current.to_path_buf());
+    let path = path.canonicalize()?;
     let mut file = File::open(&path)?;
     let metadata = file.metadata()?;
     ensure!(metadata.is_file(), "Not a journal file");
@@ -462,6 +468,29 @@ mod tests {
         assert!(read_entry(a.clone(), temp.path(), &a).unwrap().is_some());
         drop(resumed);
     }
+    #[test]
+    fn workspace_and_current_session_match_through_directory_aliases() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = journal(temp.path(), temp.path(), "alias-test");
+        let links = tempfile::tempdir().unwrap();
+        let alias = links.path().join("workspace");
+        std::os::unix::fs::symlink(temp.path(), &alias).unwrap();
+        let alias_path = alias.join(path.file_name().unwrap());
+        let entry = read_entry(alias_path.clone(), &alias, &path)
+            .unwrap()
+            .unwrap();
+        assert!(entry.current);
+        let (entries, _) = discover(
+            std::slice::from_ref(&alias),
+            &alias,
+            &alias_path,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].current);
+    }
+
     #[test]
     fn preview_windows_handle_large_records_torn_tail_and_controls() {
         let temp = tempfile::tempdir().unwrap();
