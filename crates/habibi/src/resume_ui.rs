@@ -540,7 +540,9 @@ mod tests {
         let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
         assert!(matches!(picker.key(key(KeyCode::Enter)), Action::Close));
         picker.entries[0].current = false;
-        assert!(matches!(picker.key(key(KeyCode::Enter)), Action::Open(p) if p == path));
+        assert!(
+            matches!(picker.key(key(KeyCode::Enter)), Action::Open(p) if p == path.canonicalize().unwrap())
+        );
         picker.key(key(KeyCode::Char('z')));
         assert!(picker.matches().is_empty());
         assert!(matches!(picker.key(key(KeyCode::Enter)), Action::None));
