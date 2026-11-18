@@ -627,7 +627,7 @@ name = "habibi"
 version = "0.6.1"
 dependencies = [
  "anyhow",
- "base64 0.22.1",
+ "base64 0.23.1",
  "crossterm",
  "futures-util",
  "libc",
@@ -1092,7 +1092,7 @@ version = "0.6.1"
 dependencies = [
  "anyhow",
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.1",
  "futures-util",
  "jsonschema",
  "libc",
