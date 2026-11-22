@@ -1,3 +1,15 @@
+# Habibi v0.7.1
+
+Remove the blanket tool-approval instruction from the default system prompt.
+
+- Remove “Every tool requires user approval.” without adding a replacement.
+- Keep runtime approval enforcement and Ask/YOLO behavior unchanged.
+- Apply the new default to new sessions; resumed sessions retain their saved prompt.
+
+Existing configuration and session journals remain compatible.
+
+---
+
 # Habibi v0.7.0
 
 Native pi-secure workflows, with no extension installation or Node dependency.

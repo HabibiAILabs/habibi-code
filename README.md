@@ -2,7 +2,13 @@
 
 A small, native Rust coding-agent prototype: **`libhabibi` owns the agent loop; `habibi` is its full-screen terminal frontend.** No external JavaScript runtime, Habibi daemon, or provider-agent subprocess (Ollama runs as a separate server). Optional code mode embeds QuickJS; explicitly configured MCP servers may run as child processes. Without MCP connections, a best-effort background GitHub release check is the only idle network activity; it never contacts model providers.
 
-## What's new in v0.7.0
+## What's new in v0.7.1
+
+Removed the blanket tool-approval sentence from the default system prompt.
+Runtime approval checks are unchanged. This affects new sessions; resumed sessions
+retain their saved system prompt.
+
+## Previous release: v0.7.0
 
 **Native private secrets**, based on [moejay/pi-secure](https://github.com/moejay/pi-secure):
 masked entry, private capture, confirmed local reveal/copy, redacted shell execution,
