@@ -2,7 +2,14 @@
 
 A small, native Rust coding-agent prototype: **`libhabibi` owns the agent loop; `habibi` is its full-screen terminal frontend.** No external JavaScript runtime, Habibi daemon, or provider-agent subprocess (Ollama runs as a separate server). Optional code mode embeds QuickJS; explicitly configured MCP servers may run as child processes. Without MCP connections, a best-effort background GitHub release check is the only idle network activity; it never contacts model providers.
 
-## What's new in v0.6.1
+## What's new in v0.7.0
+
+**Native private secrets**, based on [moejay/pi-secure](https://github.com/moejay/pi-secure):
+masked entry, private capture, confirmed local reveal/copy, redacted shell execution,
+and `/secret` browsing. No extension or Node runtime required.
+See [Private secrets](#private-secrets).
+
+## Previous release: v0.6.1
 
 The RAM status indicator now works on macOS as well as Linux, using native
 current-process resident memory reporting without subprocesses or elevated permissions.
@@ -490,11 +497,97 @@ modal (Esc first leaves search input when searching). Inspection never executes 
 approves tools and does not send requests to a provider. F2 remains the separate
 approval inspector during a run.
 
+## Private secrets
+
+Habibi includes the workflows from [pi-secure](https://github.com/moejay/pi-secure)
+natively. **Secrets for tools, not the transcript.** Ask “Request my API token
+securely, then use it to call the service.” Enter the value **only in the masked
+private dialog**, never in chat, slash commands, or tool arguments.
+
+### Tools
+
+All four tools use Habibi's usual approval policy, including when invoked from
+code mode. Ask mode requires approval; explicitly enabled YOLO auto-approves.
+The reveal/copy confirmations are separate and always remain local.
+
+| Tool | Behavior |
+| --- | --- |
+| `request_secret({name, reason})` | Masked terminal input; Enter submits, Esc/Ctrl-C cancels. One asterisk per character (length is locally visible). Rejects empty, multiline and NUL input. Reuses an existing name. Returns name/availability only. |
+| `capture_secret({name, command, secrets?, trimNewline?, timeout?})` | Captures shell stdout directly into memory; **neither stdout nor stderr is returned**, even on failure. Never overwrites an existing name. Optional `secrets` inject stored values as child environment variables. Removes one trailing LF/CRLF by default; `trimNewline: false` preserves it. Rejects nonzero exit, empty/NUL output and invalid UTF-8. |
+| `show_secret({name})` | Opens a private local dialog, masked by default. **R** reveals/hides and **C** copies; both require **Y** confirmation. **N/Esc** cancels confirmation; Enter/Esc closes, Ctrl-C closes even while confirming. Auto-closes after 30 seconds, including while copying. Returns shown/copied status only. |
+| `secure_exec({command, secrets, timeout?})` | Runs `/bin/sh` with named secrets in the child environment only. Buffers stdout/stderr and redacts exact values of **all** stored secrets, not just those injected. Returns exit code and redacted output. No streaming or raw-output temporary files. |
+
+Names use `[A-Za-z_][A-Za-z0-9_]*`. Commands default to **60 seconds**, accept
+`timeout` in seconds up to **300**, and enforce a **1 MiB combined output limit**.
+Timeout, cancellation, overflow, signal termination, or invalid output encoding
+discard output. Redaction also fails closed if unique stored values exceed its
+16 MiB matching budget; clear unneeded captures before retrying. A failed command may already have had side effects; inspect those
+before retrying. Shell execution requires Unix (Linux/macOS).
+
+For example, the model can call:
+
+```js
+request_secret({ name: "APP_TOKEN", reason: "Authenticate the requested API call" })
+secure_exec({
+  command: 'curl -fsS -H "Authorization: Bearer $APP_TOKEN" https://api.example.com/account',
+  secrets: ["APP_TOKEN"]
+})
+capture_secret({ name: "FILE_TOKEN", command: "cat /private/path/token" })
+```
+
+Commands, paths, reasons, names, availability, and redacted output are logged
+normally. Use a command that emits only the intended value when capturing (for
+example `curl -f` plus `jq -er .token`). **Never embed literal credentials in a
+command** or read secret-bearing files through ordinary `read`/`bash` calls.
+
+### Local commands and clipboard
+
+- **`/secret list`** (or `/secret`) opens a names-only browser. **↑/↓ or j/k**
+  selects; **Enter/R** opens the selected secret and returns to the browser on
+  close. **D/Delete** then **Y** forgets it; **N/Esc** cancels deletion.
+  **Esc/Ctrl-C** closes the browser.
+- **`/secret show NAME`** opens an existing secret directly, without a model call.
+- **`/secret clear NAME`** forgets one; **`/secret clear`** forgets all immediately.
+  Clearing even one cancels all active secure operations and invalidates queued
+  dialogs, preventing pending input/captures from restoring forgotten values.
+  Other names remain stored after a single-name clear.
+
+In headless mode, `habibi -p '/secret list'` reports names only. RPC/control
+`prompt`/`steer`/`follow_up` text containing `/secret list` or `/secret clear [NAME]`
+is handled locally, without sending it to a model. **Private entry and reveal/copy
+require the interactive terminal**: no chat, RPC, or OSC 52 fallback.
+
+Display escapes terminal control characters and truncates large values; copy uses
+the full value. Clipboard helpers receive values through stdin, never arguments:
+macOS `/usr/bin/pbcopy`, Linux Wayland `wl-copy`, or X11 `xclip`/`xsel`. Install a
+helper separately if necessary. Unsupported environments fail closed.
+
+### Storage and security boundary
+
+Values live only in the session's memory, not journals, tool history, model
+context, or serialized events. They survive turns and compaction but disappear
+on clear, session switch/resume, shutdown or restart. Private dialogs are queued.
+Memory zeroization is **not guaranteed**.
+
+**Transcript hygiene, not a sandbox or secret manager.** A malicious model or one
+following a prompt injection can still write a secret to a file, read it with
+another tool, transmit it over the network, or transform it to evade exact-value
+redaction. Other tools' output is not redacted. Approval and local reveal/copy
+confirmation do not provide isolation. Use trusted tasks/destinations and
+short-lived, least-privilege credentials; use external sandboxing/network policy
+where necessary.
+
+Terminal recordings, screenshots, process inspection, debug logs, crash dumps,
+clipboard managers/sync, and the OS are outside this protection. Hiding a value
+does not erase recordings. **The clipboard is not automatically cleared**; clear
+it and its history after pasting. Forgetting a secret does not revoke it or erase
+external copies. See the [pi-secure license notice](docs/pi-secure-LICENSE).
+
 ## Native core
 
 - Direct streaming model requests to the ChatGPT Codex backend, Anthropic Messages endpoint, and native Ollama chat endpoint.
 - OAuth PKCE, callback state checks, refresh-token rotation, and cross-process refresh locking.
-- Built-in workspace tools: `read`, `write`, exact single-match `edit`, and `bash`.
+- Built-in workspace tools: `read`, `write`, exact single-match `edit`, and `bash`. Native secret tools: `request_secret`, `capture_secret`, `show_secret`, and `secure_exec` (see above).
 - Direct model tool calls run sequentially; code mode supports bounded parallel calls. File writes use atomic replacement. Reads/writes are limited to 2 MiB; shell output is captured, drained, and bounded to 64 KiB per stream.
 - Cancellation drops HTTP requests and kills shell process groups on Unix, including descendants. Already-completed edits are not undone; in-progress atomic file operations finish before cancellation returns.
 - Private append-only JSONL sessions, exclusive session locks, resume, torn-tail recovery, and interrupted-tool-result repair.

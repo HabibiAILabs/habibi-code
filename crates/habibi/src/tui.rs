@@ -488,6 +488,7 @@ struct View {
     mcp_manager: Option<crate::mcp_ui::Manager>,
     inspector: Option<crate::inspect::Inspector>,
     resume_picker: Option<crate::resume_ui::Picker>,
+    secret_panel: Option<crate::secure_ui::Panel>,
     inspection: (Vec<(String, String)>, Vec<Message>),
     preferences: Preferences,
     model: String,
@@ -520,6 +521,7 @@ impl View {
             || self.mcp_manager.is_some()
             || self.inspector.is_some()
             || self.resume_picker.is_some()
+            || self.secret_panel.is_some()
             || self.details.is_some()
             || self.pending.is_some()
         {
@@ -1021,6 +1023,7 @@ impl View {
                 inspector.draw(frame);
             }
             if let Some(picker) = &mut self.resume_picker { picker.draw(frame); }
+            if let Some(panel) = &self.secret_panel { panel.draw(frame); }
         })?;
         Ok(())
     }
@@ -1053,6 +1056,15 @@ async fn run_session(
     auth: &libhabibi::auth::AuthStore,
     mut control: crate::control::Control,
 ) -> Result<Option<ResumeTarget>> {
+    let vault = session.secrets();
+    let mut private_requests = vault.attach_ui();
+    struct ClearSecrets(libhabibi::secure::Vault);
+    impl Drop for ClearSecrets {
+        fn drop(&mut self) {
+            self.0.clear(None);
+        }
+    }
+    let _clear_secrets = ClearSecrets(vault.clone());
     let session_id = session.id().to_string();
     let mut next_session = None;
     let _screen = Screen::enter()?;
@@ -1073,6 +1085,7 @@ async fn run_session(
         mcp_manager: None,
         inspector: None,
         resume_picker: None,
+        secret_panel: None,
         inspection: Default::default(),
         preferences: session.config().preferences.clone(),
         model: format!("{} / {}", session.config().provider, session.config().model),
@@ -1175,6 +1188,7 @@ async fn run_session(
                                 ensure!(view.resume_picker.is_none(), "Session picker open; close it before sending a prompt");
                                 ensure!(!view.mcp_manager.as_ref().is_some_and(|m| m.authenticating()), "MCP authentication in progress; finish or cancel it first");
                                 let text = crate::control::text(params)?;
+                                if let Some(result) = crate::headless::secret_command(&vault, &text) { return result; }
                                 ensure!(!interrupted, "Run is stopping; wait for idle");
                                 if method == "steer" {
                                     steering_sender.as_ref().context("No active run to steer")?.try_send(text).context("Steering queue full or run ending")?;
@@ -1213,6 +1227,19 @@ async fn run_session(
                     if shutdown { break; }
                 }
                 _=tick.tick()=>{
+                    if let Some(panel) = &mut view.secret_panel {
+                        panel.copy_result().await;
+                        if panel.poll() { view.secret_panel = None; }
+                        dirty = true;
+                    }
+                    if view.secret_panel.is_none() {
+                        while let Ok(request) = private_requests.try_recv() {
+                            if !request.cancel.is_cancelled() {
+                                view.secret_panel = Some(crate::secure_ui::Panel::request(vault.clone(), request));
+                                dirty = true; break;
+                            }
+                        }
+                    }
                     if let Some(picker) = &mut view.resume_picker { dirty |= picker.poll(); }
                     if let Some(manager) = &mut view.mcp_manager {
                         let (changed, reconnect) = manager.poll_auth();
@@ -1295,6 +1322,7 @@ async fn run_session(
                             dirty=true;
                         }
                         TerminalEvent::Paste(text)=>{
+                            if let Some(panel) = &mut view.secret_panel { panel.paste(&text); dirty = true; continue; }
                             view.reset_completion();
                             program_status.acknowledge();
                             if view.inspector.is_some() || view.resume_picker.is_some() { continue; }
@@ -1309,6 +1337,10 @@ async fn run_session(
                             dirty=true;
                         }
                         TerminalEvent::Key(key) if key.kind!=KeyEventKind::Release=>{
+                            if let Some(panel) = &mut view.secret_panel {
+                                if panel.key(key) { view.secret_panel = None; }
+                                dirty = true; continue;
+                            }
                             program_status.acknowledge();
                             dirty=true;
                             if let Some(picker) = &mut view.resume_picker {
@@ -1433,6 +1465,19 @@ async fn run_session(
                                         ""=>{},
                                         "/quit"|"/exit" if job.is_none()=>break,
                                        "/quit"|"/exit"|"/compact" if job.is_some() => view.message("This command requires an idle agent. Esc interrupts the run."),
+                                        command if command == "/secret" || command.starts_with("/secret ") => {
+                                            let args: Vec<_> = command.split_whitespace().collect();
+                                            match args.as_slice() {
+                                                ["/secret"] | ["/secret", "list"] => view.secret_panel = Some(crate::secure_ui::Panel::browser(vault.clone())),
+                                                ["/secret", "show", name] => {
+                                                    view.secret_panel = crate::secure_ui::Panel::local(vault.clone(), name);
+                                                    if view.secret_panel.is_none() { view.message("Secret unavailable."); }
+                                                },
+                                                ["/secret", "clear"] => { vault.clear(None); view.message("Secrets forgotten; active secure operations cancelled."); },
+                                                ["/secret", "clear", name] => { vault.clear(Some(name)); view.message("Secret forgotten; active secure operations cancelled."); },
+                                                _ => view.message("Usage: /secret list | /secret show NAME | /secret clear [NAME]. Never enter values in commands."),
+                                            }
+                                        },
                                         "/update" => view.message("Install/upgrade (review the script before running):\ncurl -fsSL https://habibiailabs.github.io/habibi-code/install.sh | sh\nReleases: https://github.com/habibiailabs/habibi-code/releases"),
                                         "/compact" => {
                                             let running = session.take().context("Session unavailable")?;
@@ -1470,8 +1515,8 @@ async fn run_session(
                                                 view.message(&format!("Bundled {provider} subscription models (account availability varies):\n{}\n/model: Ctrl-N/P selects a model, or type any model ID; Enter saves it.", provider.models().join("\n")));
                                             }
                                         }
-                                        "/help"=>view.message("/resume: browse sessions for this folder · /mcp: add/configure/disable/remove MCP servers · /inspect: context and tool-call inspector · /compact: summarize context · /models: list models · /model: choose or edit model ID · /settings: model, limits, status bar, tool permissions · /update: upgrade instructions · /quit: exit\nEnter: submit/steer · Alt-Enter: follow-up · Ctrl-Enter/Ctrl-J: newline\n↑/↓: select suggestion · Tab: complete command or skill · /skill:name [request]: invoke a skill · PgUp/PgDn or mouse wheel: scroll · Shift-drag: terminal selection · Ctrl-U: clear input · Ctrl-A/E: line start/end · Alt-B/F: word left/right · Ctrl-W: delete word · Ctrl-K: delete to line end · Up/Down: prompt history (when completion is closed) · F2: inspect approval\nCommands work during execution; settings apply after the run. /compact and /quit require idle. Ctrl-C clears a nonempty prompt first; otherwise cancels or quits. Esc cancels; completed edits are not undone.\nAsk mode: Ctrl-Y allows once, Ctrl-N denies (or y/n in F2 inspector). YOLO auto-approves all tools. Neither mode is a sandbox.\nLogin: subscriptions use habibi login codex|claude outside the TUI. Ollama needs no login.\nResume: /resume opens the folder-scoped session picker; CLI: habibi --resume <path>."),
-                                        command if command.starts_with('/') => view.message("Unknown command. Available: /resume, /mcp, /inspect, /compact, /models, /model, /settings, /update, /help, /quit, /exit."),
+                                        "/help"=>view.message("/secret: private secret browser, show NAME, clear [NAME] · /resume: browse sessions for this folder · /mcp: add/configure/disable/remove MCP servers · /inspect: context and tool-call inspector · /compact: summarize context · /models: list models · /model: choose or edit model ID · /settings: model, limits, status bar, tool permissions · /update: upgrade instructions · /quit: exit\nEnter: submit/steer · Alt-Enter: follow-up · Ctrl-Enter/Ctrl-J: newline\n↑/↓: select suggestion · Tab: complete command or skill · /skill:name [request]: invoke a skill · PgUp/PgDn or mouse wheel: scroll · Shift-drag: terminal selection · Ctrl-U: clear input · Ctrl-A/E: line start/end · Alt-B/F: word left/right · Ctrl-W: delete word · Ctrl-K: delete to line end · Up/Down: prompt history (when completion is closed) · F2: inspect approval\nCommands work during execution; settings apply after the run. /compact and /quit require idle. Ctrl-C clears a nonempty prompt first; otherwise cancels or quits. Esc cancels; completed edits are not undone.\nAsk mode: Ctrl-Y allows once, Ctrl-N denies (or y/n in F2 inspector). YOLO auto-approves all tools. Neither mode is a sandbox.\nLogin: subscriptions use habibi login codex|claude outside the TUI. Ollama needs no login.\nResume: /resume opens the folder-scoped session picker; CLI: habibi --resume <path>."),
+                                        command if command.starts_with('/') => view.message("Unknown command. Available: /secret, /resume, /mcp, /inspect, /compact, /models, /model, /settings, /update, /help, /quit, /exit."),
                                         _=>{
                                             view.scroll=0;view.message(&format!("You\n{prompt}"));
                                             let running=session.take().context("Session unavailable")?;
@@ -1585,6 +1630,7 @@ const SLASH_COMMANDS: &[&str] = &[
     "/model",
     "/compact",
     "/help",
+    "/secret",
     "/update",
     "/quit",
     "/exit",
@@ -1610,6 +1656,7 @@ fn slash_matches(input: &str, skills: &[(String, String)]) -> Vec<Suggestion> {
         "Choose a model",
         "Summarize context",
         "Show help",
+        "Browse private secrets",
         "Upgrade instructions",
         "Quit",
         "Quit",
@@ -2221,6 +2268,7 @@ mod tests {
             mcp_manager: None,
             inspector: None,
             resume_picker: None,
+            secret_panel: None,
             inspection: Default::default(),
             preferences: Preferences::default(),
             model: "codex / custom".into(),

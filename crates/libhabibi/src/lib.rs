@@ -7,6 +7,7 @@ pub mod ollama;
 mod provider;
 mod registry;
 mod retry;
+pub mod secure;
 mod session;
 mod skills;
 mod sse;
