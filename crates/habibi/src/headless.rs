@@ -85,6 +85,7 @@ async fn serve(
     mut input: mpsc::Receiver<std::result::Result<Vec<u8>, String>>,
     output: &mut (impl AsyncWrite + Unpin),
 ) -> Result<()> {
+    let vault = session.secrets();
     let id = session.id().to_string();
     let mut control = crate::control::Control::bind(&id, &path)?;
     eprintln!("Control socket: {}", control.path.display());
@@ -110,6 +111,12 @@ async fn serve(
             if job.is_none() {
                 if closing { break; }
                 if let Some(prompt) = queue.pop_front() {
+                    if let Some(result) = secret_command(&vault, &prompt) {
+                        let result = result?;
+                        if rpc { send(output, json!({"event":"secret_status","result":result})).await?; }
+                        else { output.write_all(format!("{result}\n").as_bytes()).await?; }
+                        continue;
+                    }
                     let mut running = session.take().context("Session unavailable")?;
                     let tx = events_tx.clone();
                     cancel = CancellationToken::new();
@@ -183,6 +190,7 @@ async fn serve(
                             "prompt" | "follow_up" | "steer" => {
                                 let text = params["text"].as_str().context("params.text must be a string")?;
                                 ensure!(!text.trim().is_empty() && text.len() <= MAX_INPUT / 2, "Text must contain 1–524288 bytes");
+                                if let Some(result) = secret_command(&vault, text) { return result; }
                                 ensure!(!cancel.is_cancelled() || job.is_none(), "Run is stopping; wait for idle");
                                 if method == "steer" {
                                     steering.as_ref().context("No active run to steer")?.try_send(text.to_owned()).context("Steering queue full or run ending")?;
@@ -226,6 +234,34 @@ async fn serve(
         }
     }
     result
+}
+
+// Local commands never become model prompts, transcript entries, or private-input fallbacks.
+pub(crate) fn secret_command(
+    vault: &libhabibi::secure::Vault,
+    text: &str,
+) -> Option<Result<Value>> {
+    let args: Vec<_> = text.split_whitespace().collect();
+    if args.first().copied() != Some("/secret") {
+        return None;
+    }
+    Some(match args.as_slice() {
+        ["/secret"] | ["/secret", "list"] => Ok(json!({"names":vault.names()})),
+        ["/secret", "clear"] => {
+            vault.clear(None);
+            Ok(json!({"cleared":true}))
+        }
+        ["/secret", "clear", name] => {
+            vault.clear(Some(name));
+            Ok(json!({"cleared":true}))
+        }
+        ["/secret", "show", _] => Err(anyhow::anyhow!(
+            "Private reveal/copy requires the interactive terminal; no RPC fallback"
+        )),
+        _ => Err(anyhow::anyhow!(
+            "Usage: /secret list | /secret clear [NAME]. Never enter values in commands."
+        )),
+    })
 }
 
 fn event_json(event: Event) -> Value {
@@ -383,6 +419,36 @@ mod tests {
     }
     fn text_response() -> Value {
         json!({"message":{"role":"assistant","content":"hello"},"done":true})
+    }
+
+    #[tokio::test]
+    async fn headless_secret_commands_do_not_contact_provider_or_enter_journal() {
+        let (dir, session, _, server) = fixture(vec![]).await;
+        let (_tx, rx) = mpsc::channel(32);
+        let mut output = Vec::new();
+        serve(
+            session,
+            dir.path().join("session.jsonl"),
+            Some("/secret list".into()),
+            false,
+            false,
+            rx,
+            &mut output,
+        )
+        .await
+        .unwrap();
+        assert_eq!(String::from_utf8(output).unwrap(), "{\"names\":[]}\n");
+        assert!(server.await.unwrap().is_empty());
+        let journal = std::fs::read_to_string(dir.path().join("session.jsonl")).unwrap();
+        assert!(!journal.contains("/secret list"));
+        let vault = libhabibi::secure::Vault::default();
+        assert!(
+            secret_command(&vault, "/secret show TOKEN")
+                .unwrap()
+                .is_err()
+        );
+        assert!(secret_command(&vault, "/secret clear").unwrap().is_ok());
+        assert!(secret_command(&vault, "ordinary prompt").is_none());
     }
 
     #[tokio::test]

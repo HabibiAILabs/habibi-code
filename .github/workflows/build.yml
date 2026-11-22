@@ -55,7 +55,9 @@ jobs:
           VERSION=$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "habibi"))')
           mkdir -p dist stage
           cp "target/$TARGET/release/habibi" README.md stage/
-          tar -czf "dist/habibi-v$VERSION-$TARGET.tar.gz" -C stage habibi README.md
+          mkdir -p stage/docs
+          cp docs/pi-secure-LICENSE stage/docs/
+          tar -czf "dist/habibi-v$VERSION-$TARGET.tar.gz" -C stage habibi README.md docs/pi-secure-LICENSE
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: habibi-${{ matrix.target }}

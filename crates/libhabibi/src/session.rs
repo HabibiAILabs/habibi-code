@@ -240,12 +240,19 @@ pub struct Session {
     config: SessionConfig,
     backend: Backend,
     tools: ToolRegistry,
+    vault: crate::secure::Vault,
     messages: Vec<Message>,
     context_bytes: usize,
     journal: Option<Journal>,
     skills: BTreeMap<String, skills::Skill>,
     loaded_skills: BTreeMap<String, String>,
     tool_history: Vec<Message>,
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        self.vault.clear(None);
+    }
 }
 
 impl Session {
@@ -274,11 +281,15 @@ impl Session {
             BTreeMap::new()
         };
         let backend = Backend::new(config.provider, auth, &config.ollama_url)?;
+        let vault = crate::secure::Vault::default();
+        let mut tools = ToolRegistry::new()?;
+        tools.register_many(vault.tools())?;
         Ok(Self {
             id: Uuid::new_v4(),
             config,
             backend,
-            tools: ToolRegistry::new()?,
+            tools,
+            vault,
             messages: Vec::new(),
             context_bytes: 0,
             journal: None,
@@ -286,6 +297,11 @@ impl Session {
             loaded_skills: BTreeMap::new(),
             tool_history: Vec::new(),
         })
+    }
+
+    /// Session-local, non-persisted secret store for a trusted private UI.
+    pub fn secrets(&self) -> crate::secure::Vault {
+        self.vault.clone()
     }
 
     /// Explicitly register a trusted host tool. Cannot replace built-ins. Tools
@@ -2141,6 +2157,23 @@ for line in sys.stdin:
         second_turn: bool,
         summary: bool,
     ) -> (String, tokio::task::JoinHandle<Vec<Value>>) {
+        mock_server_call(
+            provider,
+            second_turn,
+            if summary {
+                None
+            } else {
+                Some(("read", json!({"path":"fixture"})))
+            },
+        )
+        .await
+    }
+
+    async fn mock_server_call(
+        provider: Provider,
+        second_turn: bool,
+        call: Option<(&'static str, Value)>,
+    ) -> (String, tokio::task::JoinHandle<Vec<Value>>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
         let task = tokio::spawn(async move {
@@ -2177,14 +2210,7 @@ for line in sys.stdin:
                 }
                 requests
                     .push(serde_json::from_slice(&data[header_end..header_end + length]).unwrap());
-                let body = fake_stream(
-                    provider,
-                    if turn == 0 && !summary {
-                        Some(("read", json!({"path":"fixture"})))
-                    } else {
-                        None
-                    },
-                );
+                let body = fake_stream(provider, if turn == 0 { call.clone() } else { None });
                 let response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
@@ -2194,6 +2220,97 @@ for line in sys.stdin:
             requests
         });
         (endpoint, task)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn secure_tools_keep_values_out_of_provider_journal_and_resume() {
+        for provider in [Provider::Codex, Provider::Claude, Provider::Ollama] {
+            for tool in ["request_secret", "capture_secret"] {
+                let dir = tempfile::tempdir().unwrap();
+                let auth = AuthStore::new(dir.path().join("auth"));
+                if provider != Provider::Ollama {
+                    auth.seed_test_credentials(provider).unwrap();
+                }
+                let mut session =
+                    Session::new(test_config(provider, dir.path()), auth.clone()).unwrap();
+                let path = dir.path().join("session.jsonl");
+                session.persist(&path).unwrap();
+                let secret = "synthetic-private-never-in-context";
+                std::fs::write(dir.path().join("credential"), secret).unwrap();
+                let args = if tool == "request_secret" {
+                    json!({"name":"TOKEN","reason":"test"})
+                } else {
+                    json!({"name":"TOKEN","command":"cat credential"})
+                };
+                let (endpoint, server) = mock_server_call(provider, true, Some((tool, args))).await;
+                session.backend.endpoint = Some(endpoint);
+                let vault = session.secrets();
+                let mut ui = vault.attach_ui();
+                let local = tokio::spawn(async move {
+                    if tool == "request_secret" {
+                        let request = ui.recv().await.unwrap();
+                        request
+                            .reply
+                            .send(crate::secure::PrivateReply {
+                                value: Some(secret.into()),
+                                ..Default::default()
+                            })
+                            .ok();
+                    }
+                });
+                let (tx, mut rx) = mpsc::channel(64);
+                let consumer = tokio::spawn(async move {
+                    let mut approvals = 0;
+                    while let Some(event) = rx.recv().await {
+                        if let Event::Permission { reply, .. } = event {
+                            approvals += 1;
+                            reply.send(true).unwrap();
+                        }
+                    }
+                    approvals
+                });
+                session
+                    .prompt(
+                        "Store the credential privately",
+                        tx,
+                        CancellationToken::new(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(consumer.await.unwrap(), 1);
+                local.await.unwrap();
+                assert_eq!(vault.local_value("TOKEN").as_deref(), Some(secret));
+                assert!(
+                    !server
+                        .await
+                        .unwrap()
+                        .iter()
+                        .any(|r| r.to_string().contains(secret))
+                );
+                assert!(
+                    !serde_json::to_string(session.messages())
+                        .unwrap()
+                        .contains(secret)
+                );
+                assert!(
+                    !serde_json::to_string(session.tool_history())
+                        .unwrap()
+                        .contains(secret)
+                );
+                assert!(!std::fs::read_to_string(&path).unwrap().contains(secret));
+                drop(session);
+                assert!(vault.names().is_empty());
+                let resumed = Session::resume(&path, auth).unwrap();
+                assert!(resumed.secrets().names().is_empty());
+                assert!(
+                    resumed
+                        .tool_definitions()
+                        .iter()
+                        .any(|d| d.name == "secure_exec")
+                );
+            }
+        }
     }
 
     #[tokio::test]

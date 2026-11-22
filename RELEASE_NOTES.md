@@ -1,3 +1,25 @@
+# Habibi v0.7.0
+
+Native pi-secure workflows, with no extension installation or Node dependency.
+
+- Memory-only session vault and built-in `request_secret`, `capture_secret`,
+  `show_secret`, and `secure_exec`, subject to normal tool approvals.
+- Private masked entry, confirmed local reveal/copy, 30-second display lifetime,
+  clipboard stdin transport, and `/secret` browsing/show/clear commands.
+- Buffered execution with exact-value redaction of all stored secrets, private
+  stdout capture, bounded output/timeouts, process-group cleanup, and clear-time
+  cancellation of running/queued secret operations.
+- Headless list/clear support; private input/reveal fail closed without a TUI.
+- Regression coverage for private UI behavior, capture failures, cancellation,
+  redaction, approval, and journal/provider/resume hygiene across all adapters.
+
+This is transcript hygiene, not a sandbox or protection from a malicious model.
+No persistent secret storage, guaranteed memory zeroization, or automatic clipboard
+clearing. Existing journals remain compatible; resuming always starts an empty
+vault. See the README's **Private secrets** section for usage and limitations.
+
+---
+
 # Habibi v0.6.1
 
 Fix the RAM status indicator on macOS.

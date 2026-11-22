@@ -6,6 +6,7 @@ rust-version.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+aho-corasick = "1"
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml = "0.9"
