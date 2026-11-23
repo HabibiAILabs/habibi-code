@@ -576,7 +576,8 @@ impl View {
                 self.bytes += line.len();
             } else {
                 self.lines.push_back(line.into());
-                self.markdown_groups.push_back(self.in_markdown.then_some(self.markdown_group));
+                self.markdown_groups
+                    .push_back(self.in_markdown.then_some(self.markdown_group));
                 self.bytes += line.len() + 1;
             }
         }
@@ -2226,9 +2227,9 @@ mod tests {
     fn test_view() -> View {
         View {
             lines: VecDeque::new(),
-        markdown_groups: VecDeque::new(),
-        markdown_group: 0,
-        in_markdown: false,
+            markdown_groups: VecDeque::new(),
+            markdown_group: 0,
+            in_markdown: false,
             bytes: 0,
             input: String::new(),
             skills: Vec::new(),
@@ -2400,7 +2401,11 @@ mod tests {
         view.message("  › tool status");
         view.assistant_text("**fresh response**");
         let rendered = view.format_transcript(80);
-        let text = rendered.iter().map(Line::to_string).collect::<Vec<_>>().join("\n");
+        let text = rendered
+            .iter()
+            .map(Line::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(text.contains("**literal user text**"));
         assert!(text.contains("fresh response"));
         assert!(!text.contains("**fresh response**"));
@@ -2415,7 +2420,11 @@ mod tests {
         assert_eq!(view.lines.len(), view.markdown_groups.len());
         view.message("status");
         view.assistant_text("**new**");
-        assert!(view.format_transcript(40).iter().any(|line| line.to_string() == "new"));
+        assert!(
+            view.format_transcript(40)
+                .iter()
+                .any(|line| line.to_string() == "new")
+        );
     }
 
     #[test]
