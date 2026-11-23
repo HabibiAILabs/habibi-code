@@ -2,7 +2,16 @@
 
 A small, native Rust coding-agent prototype: **`libhabibi` owns the agent loop; `habibi` is its full-screen terminal frontend.** No external JavaScript runtime, Habibi daemon, or provider-agent subprocess (Ollama runs as a separate server). Optional code mode embeds QuickJS; explicitly configured MCP servers may run as child processes. Without MCP connections, a best-effort background GitHub release check is the only idle network activity; it never contacts model providers.
 
-## What's new in v0.7.1
+## What's new in v0.7.2
+
+Lightweight assistant Markdown rendering: nested emphasis, readable links, hanging-indent
+lists, task checkboxes, blockquotes, rules, and labeled code blocks. Tables have basic
+cell separators; aligned columns and syntax highlighting are not included. Markdown
+is isolated per assistant response and also applies to resumed sessions after restart.
+The transcript remains bounded; no syntax-highlighting grammar database or rendered-history
+cache is added.
+
+## Previous release: v0.7.1
 
 Removed the blanket tool-approval sentence from the default system prompt.
 Runtime approval checks are unchanged. This affects new sessions; resumed sessions

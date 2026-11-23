@@ -1,3 +1,19 @@
+# Habibi v0.7.2
+
+Improve assistant Markdown rendering in the terminal without bundled syntax-highlighting grammars.
+
+- Render headings, nested emphasis, strikethrough, links with visible URLs, blockquotes, rules, and task lists.
+- Wrap lists with hanging indentation; display code blocks with language labels and a subtle background.
+- Render basic tables with cell separators (aligned columns and syntax highlighting are not included).
+- Scope Markdown to assistant response blocks so unfinished fences cannot affect later messages; keep user text and tool output literal.
+- Use a lightweight event parser with default features disabled, no retained syntax tree or rendered-history cache, and the existing 256 KiB / 4,000-line transcript limits.
+- Cover rendering, list wrapping, response isolation, and bounded metadata with integration tests.
+
+Existing configuration and session journals remain compatible. Restart after upgrading;
+resumed sessions use the new renderer automatically. Actual RSS overhead has not been benchmarked.
+
+---
+
 # Habibi v0.7.1
 
 Remove the blanket tool-approval instruction from the default system prompt.

@@ -3,6 +3,7 @@ mod defaults;
 mod headless;
 mod inspect;
 mod login;
+mod markdown;
 mod mcp_auth;
 mod mcp_ui;
 mod program_status;

@@ -16,7 +16,7 @@ use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
-    text::{Line, Span},
+    text::Line,
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
 use std::{
@@ -475,6 +475,9 @@ fn activity_ball(frame: u8) -> String {
 
 struct View {
     lines: VecDeque<String>,
+    markdown_groups: VecDeque<Option<u64>>,
+    markdown_group: u64,
+    in_markdown: bool,
     bytes: usize,
     input: String,
     skills: Vec<(String, String)>,
@@ -573,6 +576,7 @@ impl View {
                 self.bytes += line.len();
             } else {
                 self.lines.push_back(line.into());
+                self.markdown_groups.push_back(self.in_markdown.then_some(self.markdown_group));
                 self.bytes += line.len() + 1;
             }
         }
@@ -581,6 +585,7 @@ impl View {
             let Some(line) = self.lines.pop_front() else {
                 break;
             };
+            self.markdown_groups.pop_front();
             self.bytes = self.bytes.saturating_sub(line.len() + 1);
         }
         if self.scroll > 0 {
@@ -590,7 +595,7 @@ impl View {
         }
     }
     fn rendered_rows(&self) -> u16 {
-        Paragraph::new(format_transcript(&self.lines))
+        Paragraph::new(self.format_transcript(self.transcript_width.max(1)))
             .wrap(Wrap { trim: false })
             .line_count(self.transcript_width.max(1))
             .min(u16::MAX as usize) as u16
@@ -793,7 +798,35 @@ impl View {
             next
         }
     }
+    fn assistant_text(&mut self, text: &str) {
+        if !self.in_markdown {
+            self.markdown_group += 1;
+            self.in_markdown = true;
+            self.append("\n");
+        }
+        self.append(text);
+    }
+    fn format_transcript(&self, width: u16) -> Vec<Line<'static>> {
+        let mut output = Vec::new();
+        let mut index = 0;
+        while index < self.lines.len() {
+            if let Some(group) = self.markdown_groups[index] {
+                let mut source = String::new();
+                while index < self.lines.len() && self.markdown_groups[index] == Some(group) {
+                    source.push_str(&self.lines[index]);
+                    source.push('\n');
+                    index += 1;
+                }
+                output.extend(crate::markdown::render(&source, width as usize));
+            } else {
+                output.push(transcript_line(&self.lines[index]));
+                index += 1;
+            }
+        }
+        output
+    }
     fn message(&mut self, text: &str) {
+        self.in_markdown = false;
         self.append(&format!("\n\n{text}\n"));
     }
     fn event(&mut self, event: Event) {
@@ -842,7 +875,7 @@ impl View {
             }
             Event::TextDelta(text) => {
                 self.activity = Activity::Responding;
-                self.append(&text);
+                self.assistant_text(&text);
             }
             Event::Permission { call, reply } => {
                 if self.yolo_active {
@@ -954,7 +987,7 @@ impl View {
                 Constraint::Length(2),
             ])
             .split(area);
-            let text = format_transcript(&self.lines);
+            let text = self.format_transcript(sections[0].width.saturating_sub(2).max(1));
             let paragraph = Paragraph::new(text).wrap(Wrap { trim: false });
             let inner_width = sections[0].width.saturating_sub(2);
             self.transcript_width = inner_width;
@@ -1073,6 +1106,9 @@ async fn run_session(
     program_status.report(crate::program_status::Status::Idle);
     let mut view = View {
         lines: VecDeque::new(),
+        markdown_groups: VecDeque::new(),
+        markdown_group: 0,
+        in_markdown: false,
         bytes: 0,
         input: String::new(),
         skills: Vec::new(),
@@ -1135,7 +1171,8 @@ async fn run_session(
                 text, tool_calls, ..
             } => {
                 if !text.is_empty() {
-                    view.message(&format!("Habibi\n{text}"));
+                    view.message("Habibi");
+                    view.assistant_text(text);
                 }
                 for call in tool_calls {
                     view.message(&format!("  › {}", tool_summary(call)));
@@ -1820,76 +1857,10 @@ fn transcript_line(text: &str) -> Line<'static> {
         Style::default().fg(Color::Red)
     } else if text.starts_with("  ") {
         Style::default().fg(Color::DarkGray)
-    } else if text.starts_with('#') {
-        Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD)
     } else {
         Style::default()
     };
-    let content = if text.starts_with('#') {
-        text.trim_start_matches('#').trim_start()
-    } else {
-        text
-    };
-    Line::from(markdown_spans(content)).style(style)
-}
-
-fn markdown_spans(mut text: &str) -> Vec<Span<'static>> {
-    let mut spans = Vec::new();
-    loop {
-        let next = [
-            text.find("**").map(|i| (i, "**")),
-            text.find('`').map(|i| (i, "`")),
-        ]
-        .into_iter()
-        .flatten()
-        .min_by_key(|(i, _)| *i);
-        let Some((start, marker)) = next else {
-            spans.push(Span::raw(text.to_owned()));
-            break;
-        };
-        let after = &text[start + marker.len()..];
-        let Some(end) = after.find(marker) else {
-            spans.push(Span::raw(text.to_owned()));
-            break;
-        };
-        spans.push(Span::raw(text[..start].to_owned()));
-        spans.push(Span::styled(
-            after[..end].to_owned(),
-            if marker == "**" {
-                Style::default().add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::Yellow)
-            },
-        ));
-        text = &after[end + marker.len()..];
-    }
-    spans
-}
-
-fn format_transcript(lines: &VecDeque<String>) -> Vec<Line<'static>> {
-    let mut code = false;
-    lines
-        .iter()
-        .map(|text| {
-            if text.starts_with("```") {
-                code = !code;
-                Line::styled(
-                    if code {
-                        format!("┌ {}", text.trim_start_matches('`'))
-                    } else {
-                        "└".into()
-                    },
-                    Style::default().fg(Color::DarkGray),
-                )
-            } else if code {
-                Line::styled(text.clone(), Style::default().fg(Color::Gray))
-            } else {
-                transcript_line(text)
-            }
-        })
-        .collect()
+    Line::from(text.to_owned()).style(style)
 }
 
 /// Character-width wrapping shared by input height, rendering and cursor placement.
@@ -2255,6 +2226,9 @@ mod tests {
     fn test_view() -> View {
         View {
             lines: VecDeque::new(),
+        markdown_groups: VecDeque::new(),
+        markdown_group: 0,
+        in_markdown: false,
             bytes: 0,
             input: String::new(),
             skills: Vec::new(),
@@ -2419,18 +2393,29 @@ mod tests {
     }
 
     #[test]
-    fn markdown_formats_prose_but_preserves_code() {
-        let lines = VecDeque::from([
-            "## Heading".into(),
-            "**bold** and `inline`".into(),
-            "```rust".into(),
-            "**literal**".into(),
-            "```".into(),
-        ]);
-        let formatted = format_transcript(&lines);
-        assert_eq!(formatted[0].to_string(), "Heading");
-        assert_eq!(formatted[1].to_string(), "bold and inline");
-        assert_eq!(formatted[3].to_string(), "**literal**");
+    fn markdown_is_scoped_to_assistant_blocks() {
+        let mut view = test_view();
+        view.message("You\n**literal user text**");
+        view.assistant_text("```rust\nunfinished");
+        view.message("  › tool status");
+        view.assistant_text("**fresh response**");
+        let rendered = view.format_transcript(80);
+        let text = rendered.iter().map(Line::to_string).collect::<Vec<_>>().join("\n");
+        assert!(text.contains("**literal user text**"));
+        assert!(text.contains("fresh response"));
+        assert!(!text.contains("**fresh response**"));
+        assert_eq!(view.lines.len(), view.markdown_groups.len());
+    }
+
+    #[test]
+    fn markdown_metadata_is_bounded_with_transcript() {
+        let mut view = test_view();
+        view.assistant_text(&"content\n".repeat(5000));
+        assert_eq!(view.lines.len(), 4000);
+        assert_eq!(view.lines.len(), view.markdown_groups.len());
+        view.message("status");
+        view.assistant_text("**new**");
+        assert!(view.format_transcript(40).iter().any(|line| line.to_string() == "new"));
     }
 
     #[test]
