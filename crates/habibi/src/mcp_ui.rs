@@ -589,7 +589,7 @@ impl Manager {
                     AuthEvent::Url(url) => auth.url = url,
                     AuthEvent::Finished(result) => {
                         let reconnect = result.is_ok();
-                        self.error = match result { Ok(()) => "OAuth credentials updated. Reconnect on the next prompt. Logout only removes local credentials.".into(), Err(error) => format!("{error:#}") };
+                        self.error = match result { Ok(()) => "Credentials updated locally; connection not yet tested. Esc: close /mcp, then send a chat message to connect automatically. Enable MCP in /settings. No restart needed.".into(), Err(error) => format!("{error:#}") };
                         self.auth = None;
                         return (true, reconnect);
                     }
@@ -699,7 +699,18 @@ impl Manager {
             ]).wrap(Wrap { trim: false }), inner);
             return;
         }
-        let footer_height = inner.height.min(if self.error.is_empty() { 3 } else { 5 });
+        // Reserve wrapped status text as well as keyboard hints on narrow terminals.
+        let status_rows = if self.error.is_empty() {
+            0
+        } else {
+            clean(&self.error)
+                .chars()
+                .count()
+                .div_ceil(inner.width as usize)
+        };
+        let footer_height = inner
+            .height
+            .min((status_rows + 6).min(u16::MAX as usize) as u16);
         let body = Rect::new(
             inner.x,
             inner.y,
@@ -715,7 +726,7 @@ impl Manager {
         let hints = if self.edit.is_some() {
             "Tab/↑/↓ focus · ←/→ edit · Ctrl-U clear · F2 transport\nF3 +argument · F4 +env mapping · Ctrl-D remove row\nEnter accept draft · Esc discard edit"
         } else {
-            "↑/↓ select · n add · Enter/e edit · Space toggle · d remove\na Authenticate · l logout · s save & apply · Esc discard changes\nChanges are drafts until saved. Reconnect on the next prompt."
+            "↑/↓ select · n add · Enter/e edit · Space toggle · d remove\na Authenticate · l logout · s save & apply · Esc discard changes\nSave changes first. Connection is automatic on your next chat message."
         };
         let mut lines: Vec<Line> = hints
             .lines()
@@ -974,6 +985,8 @@ mod tests {
         tx.send(AuthEvent::Finished(Ok(()))).unwrap();
         assert_eq!(manager.poll_auth(), (true, true));
         assert!(!manager.authenticating());
+        assert!(manager.error.contains("connection not yet tested"));
+        assert!(manager.error.contains("send a chat message"));
         let (_tx, events) = tokio::sync::mpsc::unbounded_channel();
         let task = tokio::spawn(std::future::pending());
         let abort = task.abort_handle();

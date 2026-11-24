@@ -375,7 +375,7 @@ impl SettingsDialog {
                 ),
                 (
                     12,
-                    "MCP (reconnect on next prompt)",
+                    "MCP (connect on next chat message)",
                     if self.preferences.mcp_enabled {
                         "on"
                     } else {
@@ -1423,7 +1423,7 @@ async fn run_session(
                                     crate::mcp_ui::Action::Saved => {
                                         view.mcp_manager = None;
                                         session.as_mut().context("Session unavailable")?.disconnect_mcp();
-                                        view.message("MCP configuration saved. Connections closed; enabled servers reconnect on the next prompt.");
+                                        view.message("MCP configuration saved. Enabled servers will connect automatically when you send your next chat message (if MCP is on in /settings). No restart needed.");
                                     }
                                 }
                                 continue;

@@ -1,3 +1,18 @@
+# Habibi v0.7.3
+
+Clarify MCP connection failures and what happens after authentication.
+
+- Identify the failing server during connection initialization.
+- Report safe handshake failure categories and available HTTP status codes instead of always recommending another OAuth login. Raw server payloads and credential-bearing URLs are not included.
+- Explain that connections are attempted automatically when you send the next chat message, with MCP enabled in settings; no restart or separate reconnect action is required.
+- Make clear that saving OAuth credentials does not verify the MCP connection.
+- Add regression coverage for diagnostic privacy and authentication completion wording.
+
+Existing configuration and session journals remain compatible. This improves diagnostics;
+it does not claim to resolve every server-specific handshake failure.
+
+---
+
 # Habibi v0.7.2
 
 Improve assistant Markdown rendering in the terminal without bundled syntax-highlighting grammars.

@@ -86,7 +86,8 @@ pub async fn connect_with_oauth_store(
             start(&config, &session.config().workspace, oauth_root),
         )
         .await
-        .context("MCP initialization timed out")??;
+        .with_context(|| format!("MCP server {server}: initialization timed out after 30 seconds"))?
+        .with_context(|| format!("MCP server {server}: connection failed"))?;
         let service = Arc::new(service);
         let mut cursor = None;
         let mut seen = std::collections::BTreeSet::new();
@@ -182,19 +183,71 @@ async fn start(
                     let client = rmcp::transport::auth::AuthClient::new(client, manager);
                     let transport =
                         StreamableHttpClientTransport::with_client(client, transport_config);
-                    return ().serve(transport).await.map_err(|_| {
-                        anyhow::anyhow!(
-                            "MCP OAuth handshake failed; retry or run `habibi mcp login SERVER`"
-                        )
-                    });
+                    return ().serve(transport).await.map_err(handshake_error);
                 }
             }
             let transport = StreamableHttpClientTransport::with_client(client, transport_config);
-            ().serve(transport)
-                .await
-                .context("MCP HTTP handshake failed (use /mcp Authenticate or `habibi mcp login SERVER` if authorization is required)")
+            ().serve(transport).await.map_err(handshake_error)
         }
     }
+}
+
+// Never format raw SDK errors: server responses and URLs can contain credentials.
+fn handshake_error(error: rmcp::service::ClientInitializeError) -> anyhow::Error {
+    handshake_error_ref(&error)
+}
+
+fn handshake_error_ref(error: &rmcp::service::ClientInitializeError) -> anyhow::Error {
+    use rmcp::service::ClientInitializeError as E;
+    use rmcp::transport::streamable_http_client::{
+        AuthRequiredError, HttpStatusError, InsufficientScopeError,
+    };
+    let detail = match error {
+        E::LegacyFallbackFailed { fallback, .. } => return handshake_error_ref(fallback),
+        E::ConnectionClosed(_) => "server closed the connection; check the server command and logs",
+        E::NoCompatibleProtocolVersion { .. } => {
+            "client and server have no compatible MCP protocol version"
+        }
+        E::JsonRpcError(_) => {
+            "server rejected MCP initialization; check server compatibility and logs"
+        }
+        E::TransportError { error, .. } => {
+            let mut source = Some(error.error.as_ref() as &(dyn std::error::Error + 'static));
+            while let Some(current) = source {
+                if current.is::<AuthRequiredError>() {
+                    return anyhow::anyhow!(
+                        "MCP handshake failed: authorization required; use /mcp Authenticate for this server"
+                    );
+                }
+                if current.is::<InsufficientScopeError>() {
+                    return anyhow::anyhow!(
+                        "MCP handshake failed: insufficient permissions; check the account and granted scopes"
+                    );
+                }
+                if let Some(status) = current.downcast_ref::<HttpStatusError>() {
+                    return anyhow::anyhow!("MCP handshake failed: HTTP {}", status.status);
+                }
+                if let Some(request) = current.downcast_ref::<reqwest_mcp::Error>() {
+                    if let Some(status) = request.status() {
+                        return anyhow::anyhow!("MCP handshake failed: HTTP {}", status.as_u16());
+                    }
+                    if request.is_timeout() {
+                        return anyhow::anyhow!("MCP handshake failed: network request timed out");
+                    }
+                    if request.is_connect() {
+                        return anyhow::anyhow!(
+                            "MCP handshake failed: network connection failed; check DNS, TLS and server availability"
+                        );
+                    }
+                }
+                source = current.source();
+            }
+            "transport failed; check endpoint, server availability and authentication"
+        }
+        E::Cancelled => "connection attempt cancelled",
+        _ => "invalid MCP initialization response; check endpoint and server compatibility",
+    };
+    anyhow::anyhow!("MCP handshake failed: {detail}")
 }
 
 pub(crate) fn http_client() -> Result<reqwest_mcp::Client> {
@@ -264,7 +317,7 @@ async fn start_stdio(
     let (transport, _) = TokioChildProcess::builder(command)
         .stderr(Stdio::null())
         .spawn()?;
-    ().serve(transport).await.context("MCP handshake failed")
+    ().serve(transport).await.map_err(handshake_error)
 }
 
 struct McpTool {
@@ -326,6 +379,36 @@ mod tests {
             assert!(validate_url(url).is_err(), "{url}");
         }
     }
+    #[test]
+    fn handshake_diagnostics_do_not_expose_server_payloads() {
+        use rmcp::{service::ClientInitializeError as E, transport::DynamicTransportError};
+        let closed = handshake_error(E::ConnectionClosed("SECRET".into())).to_string();
+        assert!(closed.contains("server closed"));
+        assert!(!closed.contains("SECRET"));
+        let transport = E::TransportError {
+            error: DynamicTransportError::from_parts(
+                "test",
+                std::any::TypeId::of::<()>(),
+                Box::new(
+                    rmcp::transport::streamable_http_client::HttpStatusError::new(
+                        503,
+                        Some("SECRET".into()),
+                    ),
+                ),
+            ),
+            context: "SECRET".into(),
+        };
+        let message = handshake_error(transport).to_string();
+        assert!(message.contains("HTTP 503"));
+        assert!(!message.contains("SECRET"));
+        assert!(!message.contains("Authenticate"));
+        let fallback = E::LegacyFallbackFailed {
+            discover: Box::new(E::Cancelled),
+            fallback: Box::new(E::ConnectionClosed("SECRET".into())),
+        };
+        assert_eq!(handshake_error(fallback).to_string(), closed);
+    }
+
     #[tokio::test]
     async fn disabled_servers_are_not_started() {
         let dir = tempfile::tempdir().unwrap();
