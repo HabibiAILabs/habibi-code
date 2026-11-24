@@ -590,6 +590,14 @@ mod tests {
                             } else {
                                 let result = match message["method"].as_str().unwrap() {
                                     "initialize" => {
+                                        assert_eq!(
+                                            message["params"]["protocolVersion"],
+                                            "2025-11-25"
+                                        );
+                                        assert_eq!(
+                                            message["params"]["clientInfo"]["name"],
+                                            "habibi"
+                                        );
                                         json!({"protocolVersion":message["params"]["protocolVersion"], "capabilities":{"tools":{}}, "serverInfo":{"name":"oauth-fixture","version":"1"}})
                                     }
                                     "tools/list" => json!({"tools":[]}),

@@ -2,7 +2,11 @@
 use crate::{Session, Tool, ToolContext, ToolDefinition, ToolFuture, ToolOutput};
 use anyhow::{Context, Result, ensure};
 use rmcp::{
-    RoleClient, ServiceExt, model::CallToolRequestParams, service::RunningService,
+    RoleClient, ServiceExt,
+    model::{
+        CallToolRequestParams, ClientCapabilities, ClientConfig, Implementation, ProtocolVersion,
+    },
+    service::RunningService,
     transport::TokioChildProcess,
 };
 use serde::{Deserialize, Serialize};
@@ -151,11 +155,21 @@ pub async fn connect_with_oauth_store(
     Ok(count)
 }
 
+// `serve` uses initialize, not the newer server/discover lifecycle. Do not let
+// SDK upgrades silently advertise a protocol that removed that handshake.
+fn client_config() -> ClientConfig {
+    ClientConfig::new(
+        ClientCapabilities::default(),
+        Implementation::new("habibi", env!("CARGO_PKG_VERSION")),
+    )
+    .with_protocol_version(ProtocolVersion::V_2025_11_25)
+}
+
 async fn start(
     config: &Server,
     workspace: &Path,
     oauth_root: Option<&Path>,
-) -> Result<RunningService<RoleClient, ()>> {
+) -> Result<RunningService<RoleClient, ClientConfig>> {
     match config {
         Server::Stdio(config) => start_stdio(config, workspace).await,
         Server::Http(config) => {
@@ -183,11 +197,17 @@ async fn start(
                     let client = rmcp::transport::auth::AuthClient::new(client, manager);
                     let transport =
                         StreamableHttpClientTransport::with_client(client, transport_config);
-                    return ().serve(transport).await.map_err(handshake_error);
+                    return client_config()
+                        .serve(transport)
+                        .await
+                        .map_err(handshake_error);
                 }
             }
             let transport = StreamableHttpClientTransport::with_client(client, transport_config);
-            ().serve(transport).await.map_err(handshake_error)
+            client_config()
+                .serve(transport)
+                .await
+                .map_err(handshake_error)
         }
     }
 }
@@ -294,7 +314,7 @@ pub(crate) fn validate_url(raw: &str) -> Result<()> {
 async fn start_stdio(
     config: &StdioServer,
     workspace: &Path,
-) -> Result<RunningService<RoleClient, ()>> {
+) -> Result<RunningService<RoleClient, ClientConfig>> {
     ensure!(!config.command.is_empty(), "Empty MCP command");
     let mut command = tokio::process::Command::new(&config.command);
     command
@@ -317,13 +337,16 @@ async fn start_stdio(
     let (transport, _) = TokioChildProcess::builder(command)
         .stderr(Stdio::null())
         .spawn()?;
-    ().serve(transport).await.map_err(handshake_error)
+    client_config()
+        .serve(transport)
+        .await
+        .map_err(handshake_error)
 }
 
 struct McpTool {
     definition: ToolDefinition,
     remote_name: String,
-    service: Arc<RunningService<RoleClient, ()>>,
+    service: Arc<RunningService<RoleClient, ClientConfig>>,
 }
 impl Tool for McpTool {
     fn definition(&self) -> ToolDefinition {
@@ -481,6 +504,8 @@ mod tests {
                     }
                     let result = match message["method"].as_str().unwrap() {
                         "initialize" => {
+                            assert_eq!(message["params"]["protocolVersion"], "2025-11-25");
+                            assert_eq!(message["params"]["clientInfo"]["name"], "habibi");
                             serde_json::json!({"protocolVersion":message["params"]["protocolVersion"],"capabilities":{"tools":{}},"serverInfo":{"name":"http-fixture","version":"1"}})
                         }
                         "tools/list" => serde_json::json!({"tools":[]}),

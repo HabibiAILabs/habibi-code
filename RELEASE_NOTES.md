@@ -1,3 +1,18 @@
+# Habibi v0.7.4
+
+Fix the MCP initialization protocol mismatch.
+
+- Explicitly advertise MCP protocol `2025-11-25` for the `initialize` handshake instead of inheriting the SDK's `2026-07-28` default, which uses a different startup lifecycle.
+- Apply the compatible handshake to OAuth HTTP, bearer HTTP, and stdio connections.
+- Identify the client as Habibi with its application version.
+- Verify outgoing protocol and client identity in HTTP and OAuth integration tests.
+
+Existing configuration, saved OAuth credentials, and session journals remain compatible.
+Restart after upgrading, then send a chat message to retry MCP connections. This fixes
+an identified client-side mismatch; live Datadog compatibility has not yet been verified.
+
+---
+
 # Habibi v0.7.3
 
 Clarify MCP connection failures and what happens after authentication.

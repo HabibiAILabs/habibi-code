@@ -2,7 +2,14 @@
 
 A small, native Rust coding-agent prototype: **`libhabibi` owns the agent loop; `habibi` is its full-screen terminal frontend.** No external JavaScript runtime, Habibi daemon, or provider-agent subprocess (Ollama runs as a separate server). Optional code mode embeds QuickJS; explicitly configured MCP servers may run as child processes. Without MCP connections, a best-effort background GitHub release check is the only idle network activity; it never contacts model providers.
 
-## What's new in v0.7.3
+## What's new in v0.7.4
+
+Fixed an MCP protocol mismatch: the `initialize` handshake now explicitly advertises
+`2025-11-25`, rather than the SDK's newer protocol with a different startup lifecycle.
+The fix applies to HTTP (including OAuth) and stdio servers. Restart after upgrading;
+your saved MCP credentials remain usable.
+
+## Previous release: v0.7.3
 
 MCP connection failures now identify the server and provide safe failure categories
 rather than always suggesting another OAuth login. Authentication completion explains
