@@ -2,7 +2,14 @@
 
 A small, native Rust coding-agent prototype: **`libhabibi` owns the agent loop; `habibi` is its full-screen terminal frontend.** No external JavaScript runtime, Habibi daemon, or provider-agent subprocess (Ollama runs as a separate server). Optional code mode embeds QuickJS; explicitly configured MCP servers may run as child processes. Without MCP connections, a best-effort background GitHub release check is the only idle network activity; it never contacts model providers.
 
-## What's new in v0.7.4
+## What's new in v0.7.5
+
+MCP tools can now have up to 1 MiB of serialized metadata per definition, with a
+4 MiB total catalog limit. Descriptions and input schemas remain intact. Limit
+errors identify the server, tool, byte count, and applicable limit. Restart after
+upgrading to retry connections with your existing credentials.
+
+## Previous release: v0.7.4
 
 Fixed an MCP protocol mismatch: the `initialize` handshake now explicitly advertises
 `2025-11-25`, rather than the SDK's newer protocol with a different startup lifecycle.
@@ -264,6 +271,12 @@ stderr is discarded to avoid corrupting the TUI. Remote servers use Streamable
 HTTP, require HTTPS except on loopback, and do not follow redirects. Bearer auth
 is optional and takes precedence over saved OAuth. Legacy HTTP+SSE transport is
 not implemented.
+
+Tool metadata is preserved without truncating descriptions or input schemas.
+Habibi allows up to 1 MiB of serialized metadata per tool and 4 MiB across all
+configured MCP servers in a connection attempt. Limit errors identify the server,
+tool, observed byte count, and limit. These are host-side safety bounds, not a
+guarantee that every model can fit the entire catalog in its context window.
 
 ### MCP OAuth
 

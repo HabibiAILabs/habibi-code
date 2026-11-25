@@ -70,6 +70,7 @@ pub async fn connect_with_oauth_store(
         "At most 32 MCP servers are supported"
     );
     let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
+    let mut metadata_bytes = 0usize;
     for (server, config) in config.servers {
         if match &config {
             Server::Stdio(s) => s.disabled,
@@ -108,7 +109,10 @@ pub async fn connect_with_oauth_store(
                             "MCP tool discovery failed; check connection and authentication"
                         )
                     })?;
-                discovered.extend(page.tools);
+                for tool in page.tools {
+                    let definition = tool_definition(&server, &tool, &mut metadata_bytes)?;
+                    discovered.push((tool.name.to_string(), definition));
+                }
                 ensure!(
                     discovered.len() <= 256,
                     "MCP server exposes more than 256 tools"
@@ -127,25 +131,10 @@ pub async fn connect_with_oauth_store(
         })
         .await
         .context("MCP tool discovery timed out")??;
-        for tool in discovered {
-            // Do not normalize names: normalization silently aliases distinct tools.
-            let name = format!("mcp__{server}__{}", tool.name);
-            let definition = ToolDefinition {
-                name,
-                description: format!(
-                    "MCP server {server} (untrusted description): {}",
-                    tool.description.as_deref().unwrap_or("")
-                ),
-                schema: Value::Object((*tool.input_schema).clone()),
-            };
-            ensure!(
-                definition.description.len() <= 16 * 1024
-                    && definition.schema.to_string().len() <= 64 * 1024,
-                "MCP tool metadata is too large"
-            );
+        for (remote_name, definition) in discovered {
             tools.push(Arc::new(McpTool {
                 definition,
-                remote_name: tool.name.to_string(),
+                remote_name,
                 service: service.clone(),
             }));
         }
@@ -153,6 +142,41 @@ pub async fn connect_with_oauth_store(
     let count = tools.len();
     session.register_tools(tools)?;
     Ok(count)
+}
+
+// Large APIs can legitimately expose verbose descriptions and nested schemas.
+// Bound both each complete definition and the catalog across all servers; never
+// truncate schema fields or silently omit tools. Validate as pages arrive.
+const MAX_TOOL_METADATA_BYTES: usize = 1024 * 1024;
+const MAX_CATALOG_METADATA_BYTES: usize = 4 * 1024 * 1024;
+
+fn tool_definition(
+    server: &str,
+    tool: &rmcp::model::Tool,
+    total: &mut usize,
+) -> Result<ToolDefinition> {
+    let definition = ToolDefinition {
+        name: format!("mcp__{server}__{}", tool.name),
+        description: format!(
+            "MCP server {server} (untrusted description): {}",
+            tool.description.as_deref().unwrap_or("")
+        ),
+        schema: Value::Object((*tool.input_schema).clone()),
+    };
+    let bytes = serde_json::to_vec(&definition)?.len();
+    // Names are untrusted too: bound and escape diagnostics, never print payloads.
+    let label: String = tool.name.chars().take(128).collect();
+    ensure!(
+        bytes <= MAX_TOOL_METADATA_BYTES,
+        "MCP server {server}: tool {label:?} metadata is too large: {bytes} bytes (limit {MAX_TOOL_METADATA_BYTES}); reduce the server's tool metadata"
+    );
+    let next = total.saturating_add(bytes);
+    ensure!(
+        next <= MAX_CATALOG_METADATA_BYTES,
+        "MCP server {server}: tool {label:?} would exceed the total MCP metadata limit: {next} bytes (limit {MAX_CATALOG_METADATA_BYTES}); disable unused servers or reduce their exposed tools"
+    );
+    *total = next;
+    Ok(definition)
 }
 
 // `serve` uses initialize, not the newer server/discover lifecycle. Do not let
@@ -402,6 +426,53 @@ mod tests {
             assert!(validate_url(url).is_err(), "{url}");
         }
     }
+    #[test]
+    fn metadata_supports_large_tools_without_truncation_and_bounds_catalog() {
+        let schema = serde_json::json!({"type":"object", "description":"s".repeat(80 * 1024)});
+        let tool: rmcp::model::Tool = serde_json::from_value(serde_json::json!({
+            "name":"large", "description":"d".repeat(20 * 1024), "inputSchema":schema
+        }))
+        .unwrap();
+        let mut total = 0;
+        let definition = tool_definition("datadog", &tool, &mut total).unwrap();
+        assert_eq!(definition.schema, schema);
+        assert!(definition.description.ends_with(&"d".repeat(20 * 1024)));
+        assert_eq!(total, serde_json::to_vec(&definition).unwrap().len());
+        let bytes = total;
+        total = MAX_CATALOG_METADATA_BYTES - bytes;
+        tool_definition("datadog", &tool, &mut total).unwrap();
+        assert_eq!(total, MAX_CATALOG_METADATA_BYTES);
+        let error = tool_definition("other", &tool, &mut total)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("total MCP metadata limit"));
+        assert!(error.contains("other"));
+        assert_eq!(total, MAX_CATALOG_METADATA_BYTES);
+        let mut boundary = tool.clone();
+        boundary.description = Some(
+            "d".repeat(20 * 1024 + MAX_TOOL_METADATA_BYTES - bytes)
+                .into(),
+        );
+        total = 0;
+        tool_definition("datadog", &boundary, &mut total).unwrap();
+        assert_eq!(total, MAX_TOOL_METADATA_BYTES);
+        boundary.description.as_mut().unwrap().to_mut().push('x');
+        total = 0;
+        assert!(tool_definition("datadog", &boundary, &mut total).is_err());
+        assert_eq!(total, 0);
+        let mut huge = tool;
+        huge.description = Some("SECRET".repeat(MAX_TOOL_METADATA_BYTES / 6 + 1).into());
+        total = 0;
+        let error = tool_definition("datadog", &huge, &mut total)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("datadog"));
+        assert!(error.contains("large"));
+        assert!(error.contains("bytes (limit"));
+        assert!(!error.contains("SECRET"));
+        assert_eq!(total, 0);
+    }
+
     #[test]
     fn handshake_diagnostics_do_not_expose_server_payloads() {
         use rmcp::{service::ClientInitializeError as E, transport::DynamicTransportError};

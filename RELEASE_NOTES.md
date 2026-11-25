@@ -1,3 +1,18 @@
+# Habibi v0.7.5
+
+Support larger MCP tool definitions without truncating descriptions or schemas.
+
+- Replace the separate 16 KiB description and 64 KiB schema caps with a 1 MiB limit per serialized tool definition.
+- Bound total tool metadata to 4 MiB across all servers in a connection attempt, checking definitions as discovery pages arrive.
+- Identify the server, tool, actual byte count, and limit when metadata is rejected, without printing its contents.
+- Add regression coverage for larger definitions, exact size boundaries, aggregate limits, and diagnostic privacy.
+
+Existing configuration, OAuth credentials, and session journals remain compatible.
+Restart after upgrading and send a chat message to retry MCP connections. Model
+context limits still apply; live Datadog catalog compatibility has not yet been verified.
+
+---
+
 # Habibi v0.7.4
 
 Fix the MCP initialization protocol mismatch.
