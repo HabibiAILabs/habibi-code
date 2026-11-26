@@ -627,7 +627,7 @@ name = "habibi"
 version = "0.8.0"
 dependencies = [
  "anyhow",
- "base64 0.22.1",
+ "base64 0.23.1",
  "crossterm",
  "futures-util",
  "libc",
@@ -1095,7 +1095,7 @@ dependencies = [
  "aho-corasick",
  "anyhow",
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.1",
  "futures-util",
  "jsonschema",
  "libc",
