@@ -2,6 +2,12 @@
 
 A small, native Rust coding-agent prototype: **`libhabibi` owns the agent loop; `habibi` is its full-screen terminal frontend.** No external JavaScript runtime, Habibi daemon, or provider-agent subprocess (Ollama runs as a separate server). Optional code mode embeds QuickJS; explicitly configured MCP servers may run as child processes. Without MCP connections, a best-effort background GitHub release check is the only idle network activity; it never contacts model providers.
 
+## Unreleased: Rex resume interoperability
+
+The local development fix makes resume reports name `habibi` directly instead of a shell wrapper, matching
+Rex's process-identity checks. See [Rex trust configuration](#rex-trust-configuration)
+for a journal-directory-scoped rule and verification steps. This fix is not in v0.8.0.
+
 ## What's new in v0.8.0
 
 **Rex terminal resume:** Habibi registers a signed command that changes back to
@@ -530,17 +536,24 @@ Slash commands remain available during execution. `/settings` and `/model` chang
 
 Habibi supports the [Program Resume Protocol](https://www.superlogical.com/rex/docs/build/program-resume)
 (OSC 7577, revision 0.5). When Rex supplies a valid `OSC7577_TOKEN`, the TUI
-registers a signed command equivalent to:
+registers direct argv `["habibi", "--resume", "/absolute/session.jsonl"]`:
 
 ```sh
-cd /absolute/workspace && habibi --resume /absolute/session.jsonl
+habibi --resume /absolute/session.jsonl
 ```
 
-The actual command uses `/bin/sh` with separately passed, quoted positional
-arguments, so spaces and shell metacharacters in paths remain literal. `habibi`
-must be on the restored shell's `PATH`. The report contains the workspace and
-journal paths, not conversation content. The token is removed from the environment
-before starting the runtime, so child tools and MCP servers do not inherit it.
+`--resume` restores the saved workspace, provider, model, and history, regardless
+of the launch directory; no `cd` or shell wrapper is needed. Arguments are passed
+literally, not evaluated as shell source. `habibi` must be on Rex's restored
+`PATH`. Rex cross-checks the reporting process against the reported program:
+a `/bin/sh -c` wrapper reports `sh`, not Habibi, and cannot satisfy that check.
+The report contains the canonical journal path, not conversation content. The
+token is removed before starting the runtime, so children do not inherit it.
+
+**Unreleased interoperability fix:** v0.8.0 reports the shell wrapper. The direct
+argv behavior described here requires a build containing this fix; adding a
+Habibi trust rule alone does not repair the v0.8.0 report. Do not trust `sh -c`
+as a workaround.
 
 Reports refresh when switching sessions and on SIGCONT. Intentional exits
 (`/quit`, `/exit`, idle Ctrl-C, or control-socket shutdown) clear the record;
@@ -548,6 +561,58 @@ terminal loss, SIGHUP, and SIGTERM do not. Paths that cannot be represented safe
 or fit within the 2048-byte report limit clear an older record instead.
 Set `HABIBI_NO_PROGRAM_RESUME=1` to opt out. No reports are emitted without a valid
 token, with redirected stdout, or in headless/RPC mode.
+
+#### Rex trust configuration
+
+Rex requires an explicit [resume rule](https://www.superlogical.com/rex/docs/customize/resume-rules).
+For the default Habibi session directory, the user can add this to Rex's
+`init.lua` (Habibi does not modify it):
+
+```lua
+rex.set("resume.trust.habibi", {
+  command = {
+    "habibi",
+    "--resume",
+    rex.match.under("~/.local/share/habibi/sessions"),
+  },
+})
+```
+
+For a custom `XDG_DATA_HOME`, use its resolved absolute `habibi/sessions`
+directory instead. Habibi reports canonical paths; if the data directory is a
+symlink, use its real target. Do not widen the rule to all of `/tmp`, home, or `/`.
+`rex.match.under` requires an absolute descendant path, rejects `..`, and Rex
+rechecks the path after following symlinks before resuming. Journals outside the
+approved directory intentionally do not match. Only keep trusted journals there:
+resume restores saved settings, including YOLO permissions when enabled.
+
+The command's first element is exactly `habibi`. Rex distinguishes a bare name
+from an absolute path in rule matching, while its process-identity check recognizes
+`habibi` and `/path/to/habibi` as the same program. No `flags` table is needed:
+this rule permits exactly the reported three arguments and no appended flags.
+Provider/model/workspace settings are restored from the journal rather than copied
+from the original launch arguments. The rule does not authenticate the contents
+of the journal or pin which binary `PATH` resolves to.
+
+After reviewing the rule, run `rex config check`, then `rex config reload`.
+Reload applies rules to running terminals without restarting the server; a failed
+reload keeps the last successfully loaded rules. In the relevant Rex terminal,
+inspect its records with:
+
+```sh
+rex block call -b "$REX_BLOCK" program_resume_records
+```
+
+Check for the current journal, `program=habibi`, and no `untrusted_reason`.
+`chosen=true` alone does **not** mean trusted. `no_rule` means no matching command
+or an out-of-scope journal path; `program_differs` means process/command identity
+mismatch; `config_incomplete` means configuration loading failed. An old `program=sh`
+record requires running the fixed Habibi build, not broadening trust to a shell.
+
+For end-to-end restart testing, use a disposable Rex **socket and state directory**
+with isolated configuration and sessions. A separate socket alone does not isolate
+persisted state. Never restart the daily server or use other agents' sessions for
+this test.
 
 ### Context and tool-call inspector
 
