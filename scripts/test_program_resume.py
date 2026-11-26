@@ -70,7 +70,8 @@ class Terminal:
         os.close(self.master)
 
 
-with tempfile.TemporaryDirectory(prefix="habibi-resume-") as temp:
+# Keep Unix socket paths below macOS SUN_LEN even when TMPDIR is deeply nested.
+with tempfile.TemporaryDirectory(prefix="habibi-resume-", dir="/tmp") as temp:
     root = Path(temp)
     workspace = root / "space ' $(touch BAD); project"
     workspace.mkdir()
