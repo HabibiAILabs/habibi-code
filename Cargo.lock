@@ -624,7 +624,7 @@ dependencies = [
 
 [[package]]
 name = "habibi"
-version = "0.7.5"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -637,6 +637,7 @@ dependencies = [
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "tokio",
  "tokio-util",
@@ -1089,7 +1090,7 @@ checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
 
 [[package]]
 name = "libhabibi"
-version = "0.7.5"
+version = "0.8.0"
 dependencies = [
  "aho-corasick",
  "anyhow",

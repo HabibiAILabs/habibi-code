@@ -1067,6 +1067,7 @@ pub async fn run(
     mut session: Session,
     mut path: PathBuf,
     auth: libhabibi::auth::AuthStore,
+    resume_token: Option<crate::program_resume::Token>,
 ) -> Result<()> {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -1074,8 +1075,9 @@ pub async fn run(
         previous(info)
     }));
     let mut control = crate::control::Control::bind(&session.id().to_string(), &path)?;
+    let mut program_resume = crate::program_resume::Reporter::terminal(resume_token);
     while let Some((next, next_path, next_control)) =
-        run_session(session, path, &auth, control).await?
+        run_session(session, path, &auth, control, &mut program_resume).await?
     {
         session = next;
         path = next_path;
@@ -1089,6 +1091,7 @@ async fn run_session(
     path: PathBuf,
     auth: &libhabibi::auth::AuthStore,
     mut control: crate::control::Control,
+    program_resume: &mut crate::program_resume::Reporter<io::Stdout>,
 ) -> Result<Option<ResumeTarget>> {
     let vault = session.secrets();
     let mut private_requests = vault.attach_ui();
@@ -1105,6 +1108,8 @@ async fn run_session(
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     let mut program_status = crate::program_status::Reporter::terminal();
     program_status.report(crate::program_status::Status::Idle);
+    program_resume.report(&session.config().workspace, &path);
+    let mut continued = crate::program_resume::ContinueSignal::new();
     let mut view = View {
         lines: VecDeque::new(),
         markdown_groups: VecDeque::new(),
@@ -1213,6 +1218,10 @@ async fn run_session(
         loop {
             // Render at most once per frame, not once per token or tool-output chunk.
             tokio::select! {
+                _ = continued.recv() => {
+                    program_resume.report(&current_config.workspace, &path);
+                    dirty = true;
+                }
                 Some(request) = control.requests.recv() => {
                     use serde_json::json;
                     let id = request.value["id"].clone();
@@ -1262,7 +1271,7 @@ async fn run_session(
                     })();
                     request.reply.send(crate::control::response(id, result)).await;
                     dirty = true;
-                    if shutdown { break; }
+                    if shutdown { program_resume.clear(); break; }
                 }
                 _=tick.tick()=>{
                     if let Some(panel) = &mut view.secret_panel {
@@ -1413,7 +1422,7 @@ async fn run_session(
                                 }
 
                                 if view.dialog.is_none() && view.mcp_manager.is_none() && view.clear_draft() { continue; }
-                                if let Some(cancel)=&cancellation {cancel.cancel();interrupted=true;program_status.report(crate::program_status::Status::Idle);view.followups.clear();view.pending=None;view.details=None;view.status="Cancelling…".into();}else{break}
+                                if let Some(cancel)=&cancellation {cancel.cancel();interrupted=true;program_status.report(crate::program_status::Status::Idle);view.followups.clear();view.pending=None;view.details=None;view.status="Cancelling…".into();}else{program_resume.clear();break}
                                 continue
                             }
                             if let Some(manager) = &mut view.mcp_manager {
@@ -1501,7 +1510,7 @@ async fn run_session(
                                     view.remember_prompt(&prompt);
                                     match prompt.trim() {
                                         ""=>{},
-                                        "/quit"|"/exit" if job.is_none()=>break,
+                                        "/quit"|"/exit" if job.is_none()=>{program_resume.clear();break},
                                        "/quit"|"/exit"|"/compact" if job.is_some() => view.message("This command requires an idle agent. Esc interrupts the run."),
                                         command if command == "/secret" || command.starts_with("/secret ") => {
                                             let args: Vec<_> = command.split_whitespace().collect();

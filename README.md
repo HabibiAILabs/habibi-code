@@ -2,7 +2,17 @@
 
 A small, native Rust coding-agent prototype: **`libhabibi` owns the agent loop; `habibi` is its full-screen terminal frontend.** No external JavaScript runtime, Habibi daemon, or provider-agent subprocess (Ollama runs as a separate server). Optional code mode embeds QuickJS; explicitly configured MCP servers may run as child processes. Without MCP connections, a best-effort background GitHub release check is the only idle network activity; it never contacts model providers.
 
-## What's new in v0.7.5
+## What's new in v0.8.0
+
+**Rex terminal resume:** Habibi registers a signed command that changes back to
+its workspace and runs `habibi --resume` with the current session journal. Session
+switches and SIGCONT refresh the record; intentional quit clears it, while terminal
+loss preserves it. See [Terminal resume](#terminal-resume-rex-and-osc-7577).
+
+**Faster releases:** Rust build caching and exact-commit CI artifact reuse avoid
+rebuilding the same four platform binaries during publication, without skipping tests.
+
+## Previous release: v0.7.5
 
 MCP tools can now have up to 1 MiB of serialized metadata per definition, with a
 4 MiB total catalog limit. Descriptions and input schemas remain intact. Limit
@@ -516,6 +526,29 @@ The library never emits terminal status sequences.
 
 Slash commands remain available during execution. `/settings` and `/model` changes are queued until the current run finishes, before queued follow-ups; current tool permissions stay unchanged. `/compact`, `/quit`, and `/exit` require an idle agent.
 
+### Terminal resume (Rex and OSC 7577)
+
+Habibi supports the [Program Resume Protocol](https://www.superlogical.com/rex/docs/build/program-resume)
+(OSC 7577, revision 0.5). When Rex supplies a valid `OSC7577_TOKEN`, the TUI
+registers a signed command equivalent to:
+
+```sh
+cd /absolute/workspace && habibi --resume /absolute/session.jsonl
+```
+
+The actual command uses `/bin/sh` with separately passed, quoted positional
+arguments, so spaces and shell metacharacters in paths remain literal. `habibi`
+must be on the restored shell's `PATH`. The report contains the workspace and
+journal paths, not conversation content. The token is removed from the environment
+before starting the runtime, so child tools and MCP servers do not inherit it.
+
+Reports refresh when switching sessions and on SIGCONT. Intentional exits
+(`/quit`, `/exit`, idle Ctrl-C, or control-socket shutdown) clear the record;
+terminal loss, SIGHUP, and SIGTERM do not. Paths that cannot be represented safely
+or fit within the 2048-byte report limit clear an older record instead.
+Set `HABIBI_NO_PROGRAM_RESUME=1` to opt out. No reports are emitted without a valid
+token, with redirected stdout, or in headless/RPC mode.
+
 ### Context and tool-call inspector
 
 Run **`/inspect`** at any time to open a two-tab modal. During execution it shows the latest context-boundary snapshot; the agent keeps running. Close and reopen to refresh:
@@ -735,7 +768,7 @@ Subagents, repository indexing, API-key providers, and streaming shell output. A
 
 ## CI and releases
 
-GitHub Actions tests and packages all four supported targets, checks Rust 1.89 compatibility, and runs the Linux PTY smoke tests and hermetic installer tests. Stable `v*` tags matching the workspace version trigger a gated release with archives and `SHA256SUMS`. GitHub Pages deploys the static website and canonical installer from `main`. Actions are pinned to commit SHAs and tracked by Dependabot.
+GitHub Actions tests and packages all four supported targets, checks Rust 1.89 compatibility, and runs the Linux PTY smoke tests and hermetic installer tests. Stable `v*` tags matching the workspace version publish the artifacts from successful trusted CI for that exact commit, without rebuilding. Artifacts are retained for 30 days; missing or expired artifacts require an explicit CI rebuild. Target-specific Rust caches reduce repeated compilation. Releases include all four archives and `SHA256SUMS`. GitHub Pages deploys the static website and canonical installer from `main`. Actions are pinned to commit SHAs and tracked by Dependabot.
 
 See [the release checklist](docs/releasing.md) for publishing, platform limitations, and installer configuration.
 

@@ -1,3 +1,27 @@
+# Habibi v0.8.0
+
+Rex terminal resume and faster, verified releases.
+
+- Support the Program Resume Protocol (OSC 7577, revision 0.5), using signed reports when Rex provides a valid token.
+- Register a command equivalent to `cd /absolute/workspace && habibi --resume /absolute/session.jsonl`, with separately quoted path arguments.
+- Refresh on session switches and SIGCONT. Clear on intentional quit; preserve the record on terminal loss, SIGHUP, and SIGTERM.
+- Remove the resume token before starting the runtime so child tools and MCP servers do not inherit it. Opt out with `HABIBI_NO_PROGRAM_RESUME=1`; headless/RPC modes emit no reports.
+- Cache Rust builds and publish the four exact-commit, successful CI artifacts instead of rebuilding for release. Validate artifact provenance, digests, archive names, and contents before publication.
+- Add protocol unit tests and PTY coverage for signing, quoting, resume, signals, quit, opt-out, and non-TUI modes on all supported CI platforms.
+
+Existing configuration, credentials, and session journals remain compatible. Restart
+after upgrading. The restored shell must have `habibi` on PATH. Automated protocol
+tests pass; live Rex integration and provider subscriptions are not tested. macOS
+binaries remain unsigned and not notarized.
+
+## Install or upgrade
+
+```sh
+curl -fsSL https://habibiailabs.github.io/habibi-code/install.sh | sh
+```
+
+---
+
 # Habibi v0.7.5
 
 Support larger MCP tool definitions without truncating descriptions or schemas.

@@ -38,17 +38,28 @@ jobs:
             sudo apt-get update
             sudo apt-get install -y musl-tools
           fi
+      - name: Cache Rust dependencies and build outputs
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: ${{ matrix.target }}
+          save-if: ${{ github.ref == 'refs/heads/main' && github.event_name != 'pull_request' }}
       - run: cargo fmt --all -- --check
       - run: cargo test --locked --workspace --all-targets
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - run: python3 scripts/test_install.py
+      - run: python3 scripts/test_release_artifacts.py
       - name: Build distribution binary
         run: cargo build --locked --release -p habibi --target "$TARGET"
-      - name: Check binary
-        run: target/"$TARGET"/release/habibi --version
+      - name: Check binary version matches the workspace
+        shell: bash
+        run: |
+          VERSION=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
+          test "$(target/"$TARGET"/release/habibi --version)" = "habibi $VERSION"
       - name: Linux terminal smoke test
         if: runner.os == 'Linux'
         run: python3 scripts/smoke.py target/"$TARGET"/release/habibi
+      - name: Program resume protocol test
+        run: python3 scripts/test_program_resume.py target/"$TARGET"/release/habibi
       - name: Package
         shell: bash
         run: |
@@ -63,4 +74,5 @@ jobs:
           name: habibi-${{ matrix.target }}
           path: dist/*.tar.gz
           if-no-files-found: error
-          retention-days: 7
+          overwrite: true
+          retention-days: 30
